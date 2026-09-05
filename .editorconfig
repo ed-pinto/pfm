@@ -1,0 +1,149 @@
+# EditorConfig: https://editorconfig.org
+# This is the top-most .editorconfig file — stops editors from searching further up.
+root = true
+
+# ── Universal defaults ────────────────────────────────────────────────────────
+[*]
+charset                  = utf-8
+end_of_line              = lf
+indent_style             = space
+indent_size              = 4
+tab_width                = 4
+trim_trailing_whitespace = true
+insert_final_newline     = true
+max_line_length          = 120
+
+# ── Web / Script files ────────────────────────────────────────────────────────
+[*.{js,mjs,cjs,ts,tsx,jsx}]
+indent_size = 2
+
+[*.{html,htm}]
+indent_size = 2
+
+[*.{css,scss,less}]
+indent_size = 2
+
+[*.json]
+indent_size = 2
+
+[*.{yml,yaml}]
+indent_size = 2
+
+# ── C# ────────────────────────────────────────────────────────────────────────
+[*.{cs,csx}]
+indent_size                                                  = 4
+
+# Naming: PascalCase for types and members
+dotnet_naming_rule.types_should_be_pascal_case.severity     = warning
+dotnet_naming_rule.types_should_be_pascal_case.symbols      = types
+dotnet_naming_rule.types_should_be_pascal_case.style        = pascal_case_style
+
+dotnet_naming_symbols.types.applicable_kinds                = class,struct,interface,enum,delegate
+dotnet_naming_symbols.types.applicable_accessibilities      = *
+
+dotnet_naming_style.pascal_case_style.capitalization        = pascal_case
+
+# Naming: interfaces must start with I
+dotnet_naming_rule.interfaces_must_start_with_i.severity    = warning
+dotnet_naming_rule.interfaces_must_start_with_i.symbols     = interface_symbols
+dotnet_naming_rule.interfaces_must_start_with_i.style       = interface_style
+
+dotnet_naming_symbols.interface_symbols.applicable_kinds    = interface
+dotnet_naming_symbols.interface_symbols.applicable_accessibilities = *
+
+dotnet_naming_style.interface_style.required_prefix         = I
+dotnet_naming_style.interface_style.capitalization          = pascal_case
+
+# Naming: private fields use _camelCase
+dotnet_naming_rule.private_fields_camel_case.severity       = warning
+dotnet_naming_rule.private_fields_camel_case.symbols        = private_fields
+dotnet_naming_rule.private_fields_camel_case.style          = underscore_camel_case_style
+
+dotnet_naming_symbols.private_fields.applicable_kinds       = field
+dotnet_naming_symbols.private_fields.applicable_accessibilities = private
+
+dotnet_naming_style.underscore_camel_case_style.required_prefix = _
+dotnet_naming_style.underscore_camel_case_style.capitalization  = camel_case
+
+# Naming: local variables and parameters use camelCase
+dotnet_naming_rule.locals_camel_case.severity               = warning
+dotnet_naming_rule.locals_camel_case.symbols                = locals_and_params
+dotnet_naming_rule.locals_camel_case.style                  = camel_case_style
+
+dotnet_naming_symbols.locals_and_params.applicable_kinds    = local,parameter
+dotnet_naming_symbols.locals_and_params.applicable_accessibilities = *
+
+dotnet_naming_style.camel_case_style.capitalization         = camel_case
+
+# Naming: constants use PascalCase
+dotnet_naming_rule.constants_pascal_case.severity           = warning
+dotnet_naming_rule.constants_pascal_case.symbols            = constants
+dotnet_naming_rule.constants_pascal_case.style              = pascal_case_style
+
+dotnet_naming_symbols.constants.applicable_kinds            = field,local
+dotnet_naming_symbols.constants.required_modifiers          = const
+
+# ── C# code style ─────────────────────────────────────────────────────────────
+# Braces — Allman style (opening brace on new line)
+csharp_new_line_before_open_brace                           = all
+csharp_new_line_before_else                                 = true
+csharp_new_line_before_catch                                = true
+csharp_new_line_before_finally                              = true
+csharp_new_line_before_members_in_object_initializers       = true
+csharp_new_line_before_members_in_anonymous_types           = true
+
+# Spacing
+csharp_space_after_cast                                     = false
+csharp_space_before_colon_in_inheritance_clause             = true
+csharp_space_after_colon_in_inheritance_clause              = true
+csharp_space_around_binary_operators                        = before_and_after
+
+# Indentation
+csharp_indent_case_contents                                 = true
+csharp_indent_switch_labels                                 = true
+csharp_indent_labels                                        = flush_left
+
+# Prefer var when type is obvious
+csharp_style_var_for_built_in_types                         = false:suggestion
+csharp_style_var_when_type_is_apparent                      = true:suggestion
+csharp_style_var_elsewhere                                  = false:suggestion
+
+# Expression-bodied members
+csharp_style_expression_bodied_methods                      = false:silent
+csharp_style_expression_bodied_properties                   = true:suggestion
+
+# Null checking
+dotnet_style_null_propagation                               = true:suggestion
+dotnet_style_coalesce_expression                            = true:suggestion
+
+# Using directives inside namespace
+csharp_using_directive_placement                            = outside_namespace:warning
+
+# ── C# analysis severity overrides ────────────────────────────────────────────
+# Switch exhaustiveness is enforced by the compiler for pattern-matching switches;
+# these rules add extra coverage.
+dotnet_diagnostic.CS8509.severity                           = error   # non-exhaustive switch expression
+dotnet_diagnostic.CS8524.severity                           = error   # non-exhaustive switch expression (enum)
+dotnet_diagnostic.IDE0010.severity                          = warning  # add missing switch cases
+dotnet_diagnostic.IDE0072.severity                          = warning  # add missing switch cases (expression)
+dotnet_diagnostic.CA1001.severity                           = warning  # types with IDisposable fields should be IDisposable
+dotnet_diagnostic.CA1822.severity                           = suggestion # mark member as static
+dotnet_diagnostic.CA2000.severity                           = warning  # dispose objects before losing scope
+dotnet_diagnostic.CS8600.severity                           = warning  # nullable: assigning null to non-nullable
+dotnet_diagnostic.CS8602.severity                           = warning  # nullable: dereference of possibly null
+dotnet_diagnostic.CS8603.severity                           = warning  # nullable: returning null from non-nullable function
+dotnet_diagnostic.CA1303.severity                           = none # Do not warn about passing literals to methods (e.g., Console.WriteLine)
+
+# ── C# member ordering (enforced by code review, not analyzer) ──────────────
+# Order: Constants → Static Fields -> Static Properties -> Static Methods → Fields → Constructors → Properties → Methods → Operators → Events → Nested Types
+# Within each category, order by access level: public → internal → protected → private
+
+# ── Markdown ──────────────────────────────────────────────────────────────────
+[*.md]
+trim_trailing_whitespace = false  # two trailing spaces = intentional line break in MD
+
+# ── Generated / vendored files ────────────────────────────────────────────────
+[{package-lock.json,yarn.lock,pnpm-lock.yaml}]
+indent_size              = unset
+insert_final_newline     = unset
+trim_trailing_whitespace = unset

@@ -1,0 +1,18 @@
+<Project>
+  <PropertyGroup>
+    <!-- Treat C# warnings as errors in CI -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <AnalysisMode>All</AnalysisMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Microsoft's recommended analyzer pack -->
+    <PackageReference Include="Microsoft.CodeAnalysis.NetAnalyzers" Version="10.*">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+</Project>

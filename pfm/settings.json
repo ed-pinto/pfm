@@ -1,0 +1,29 @@
+{
+"Serilog": {
+    "Using": ["Serilog.Sinks.File", "Serilog.Sinks.Async"],
+    "Enrich": ["FromLogContext"],
+    "Properties": {
+      "SourceContext": "pfm"
+    },
+    "WriteTo": [
+      {
+        "Name": "Async",
+        "Args": {
+          "configure": [
+            {
+              "Name": "File",
+              "Args": {
+                "path": "logs/pfm.log",
+                "fileSizeLimitBytes": 2097152,
+                "rollOnFileSizeLimit": true,
+                "retainedFileCountLimit": 5,
+                "outputTemplate": "[{Timestamp:HH:mm:ss} {Level:u3} {SourceContext}] {Message:lj}{NewLine}{Exception}"
+              }
+            }
+          ],
+          "flushInterval": 3000
+        }
+      }
+    ]
+  }
+}
