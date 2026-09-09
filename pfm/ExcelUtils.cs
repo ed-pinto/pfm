@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Runtime.InteropServices;
@@ -54,6 +55,271 @@ public static class ExcelUtils
         finally
         {
             ReleaseComObject(workbooks);
+        }
+    }
+
+    /// <summary>
+    /// Starts an Excel instance in a process of its own and opens the workbook at the specified path in it.
+    /// </summary>
+    /// <param name="filePath">The path to the workbook.</param>
+    /// <returns>
+    /// A session that owns the new instance.  Disposing the session closes the workbook and ends that process.
+    /// </returns>
+    /// <remarks>
+    /// A sweep runs several instances of this tool at once, and two of them sharing one Excel process would share its
+    /// calculation state: the workbook one job is driving would be recalculated by the other job's writes.  Isolation
+    /// is therefore a correctness requirement rather than a preference, so this deliberately does not consult the
+    /// running object table the way <see cref="OpenWorkbook"/> does.  Excel registers its class factory as single use,
+    /// so each activation starts a fresh excel.exe; the resulting process is checked against the instances that were
+    /// already running so that a violation of that assumption fails here rather than silently corrupting a sweep.
+    /// </remarks>
+    public static ExcelSession StartIsolatedWorkbook(string filePath)
+    {
+        ArgumentNullException.ThrowIfNull(filePath);
+
+        string fullPath = Path.GetFullPath(filePath);
+        HashSet<int> existing = GetExcelProcessIds();
+
+        var excel = new Excel.Application
+        {
+            Visible = false,
+            DisplayAlerts = false,
+            AskToUpdateLinks = false
+        };
+
+        int processId = GetProcessId(excel);
+
+        if (processId == 0 || existing.Contains(processId))
+        {
+            // Quitting is the only safe way to leave an instance we cannot claim; another job may be driving it.
+            TryQuit(excel);
+            ReleaseComObject(excel);
+
+            throw new InvalidOperationException("Excel did not start in a process of its own; it "
+                + (processId == 0 ? "did not report a process id" : "reused process " + Format(processId))
+                + ".  A simulation cannot share an Excel process with another job.");
+        }
+
+        Log.Logger.Information("PFM_EXCEL_ISOLATED: process=" + Format(processId) + " " + fullPath);
+
+        Excel.Workbooks workbooks = excel.Workbooks;
+        try
+        {
+            Excel.Workbook opened = workbooks.Open(Filename: fullPath, UpdateLinks: 0, ReadOnly: false);
+            return new ExcelSession(excel, opened, startedExcel: true, processId: processId);
+        }
+        finally
+        {
+            ReleaseComObject(workbooks);
+        }
+    }
+
+    /// <summary>
+    /// Gets the value a defined name resolves to, whatever kind of name it is.
+    /// </summary>
+    /// <param name="workbook">The workbook that defines the name.</param>
+    /// <param name="definedName">The defined name to read.</param>
+    /// <returns>The value the name resolves to.</returns>
+    /// <remarks>
+    /// The workbook defines names three ways: as a reference to a cell, ex. TaxProvisionTolerance, as a numeric
+    /// constant, ex. SemestersPerYear, and as a text constant, ex. Hist.  Evaluating the name rather than parsing what
+    /// it refers to reads all three the same way, and reads them the way the workbook's own formulas do.
+    /// </remarks>
+    public static object? EvaluateName(Excel.Workbook workbook, string definedName)
+    {
+        ArgumentNullException.ThrowIfNull(workbook);
+
+        Excel.Application excel = workbook.Application;
+        try
+        {
+            object? value = excel.Evaluate(definedName);
+
+            // A name that refers to a cell evaluates to the range, not to what the cell holds, so the reading kinds of
+            // name are only alike once the range has been unwrapped.
+            if (value is Excel.Range range)
+            {
+                try
+                {
+                    if (range.Count != 1)
+                    {
+                        throw new InvalidOperationException("Defined name " + definedName + " refers to "
+                            + Format(range.Count) + " cells rather than one, so it has no single value.");
+                    }
+
+                    value = range.Value2;
+                }
+                finally
+                {
+                    ReleaseComObject(range);
+                }
+            }
+
+            // Evaluate reports a name it cannot resolve as an error value rather than by throwing, and an error value
+            // marshals back as the integer error code.
+            if (value is null or int)
+            {
+                throw new InvalidOperationException("Defined name " + definedName + " did not evaluate to a value.");
+            }
+
+            return value;
+        }
+        catch (COMException ex)
+        {
+            throw new InvalidOperationException("Defined name " + definedName + " could not be evaluated.", ex);
+        }
+        finally
+        {
+            ReleaseComObject(excel);
+        }
+    }
+
+    /// <summary>
+    /// Reads the number a defined name resolves to.
+    /// </summary>
+    /// <param name="workbook">The workbook that defines the name.</param>
+    /// <param name="definedName">The defined name to read.</param>
+    /// <returns>The number the name resolves to.</returns>
+    public static double GetNameNumber(Excel.Workbook workbook, string definedName)
+    {
+        object? value = EvaluateName(workbook, definedName);
+
+        return value as double?
+            ?? throw new InvalidOperationException("Defined name " + definedName + " resolved to a value that is not "
+                + "a number.");
+    }
+
+    /// <summary>
+    /// Writes a value into the single cell a defined name refers to.
+    /// </summary>
+    /// <param name="workbook">The workbook that defines the name.</param>
+    /// <param name="definedName">The defined name to write through.</param>
+    /// <param name="value">The value to write.</param>
+    /// <remarks>
+    /// Writing through the name rather than the address leaves the location of a parameter in the workbook's hands, so
+    /// a cell that moves does not break this tool.  Ex. SimulationMode is 10_Parameters!B6 today.
+    /// </remarks>
+    public static void SetNameValue(Excel.Workbook workbook, string definedName, object value)
+    {
+        ArgumentNullException.ThrowIfNull(workbook);
+
+        Excel.Names? names = null;
+        Excel.Name? name = null;
+        Excel.Range? range = null;
+        try
+        {
+            names = workbook.Names;
+
+            try
+            {
+                name = names.Item(definedName);
+                range = name.RefersToRange;
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException("Defined name " + definedName
+                    + " was not found in the workbook, or does not refer to a range.", ex);
+            }
+
+            if (range.Count != 1)
+            {
+                throw new InvalidOperationException("Defined name " + definedName + " refers to "
+                    + Format(range.Count) + " cells rather than one, so it cannot be assigned a value.");
+            }
+
+            range.Value2 = value;
+        }
+        finally
+        {
+            ReleaseComObject(range);
+            ReleaseComObject(name);
+            ReleaseComObject(names);
+        }
+    }
+
+    /// <summary>
+    /// Maps the header text of each of a table's columns to its zero based position in the table.
+    /// </summary>
+    /// <param name="table">The table to describe.</param>
+    /// <returns>The column positions, keyed by header text.</returns>
+    /// <remarks>
+    /// The positions index the grid that <see cref="ReadTable"/> returns.  Resolving them once and reading the whole
+    /// grid afterwards is what keeps a harvest to a single cross process call, however many columns it wants.
+    /// </remarks>
+    public static Dictionary<string, int> GetColumnIndexes(Excel.ListObject table)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+
+        var indexes = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        Excel.ListColumns columns = table.ListColumns;
+        try
+        {
+            foreach (Excel.ListColumn column in columns)
+            {
+                try
+                {
+                    indexes[column.Name] = column.Index - 1;
+                }
+                finally
+                {
+                    ReleaseComObject(column);
+                }
+            }
+        }
+        finally
+        {
+            ReleaseComObject(columns);
+        }
+
+        return indexes;
+    }
+
+    /// <summary>
+    /// Reads every data row of every column of a table in a single call.
+    /// </summary>
+    /// <param name="table">The table to read.</param>
+    /// <returns>The values as a zero based grid indexed by row and then by column.  Empty cells are null.</returns>
+    /// <remarks>
+    /// A simulation harvests ten scattered columns of one table per pass.  Reading the whole data body costs one cross
+    /// process call rather than ten, and the columns that are not harvested cost nothing beyond the marshalling.
+    /// </remarks>
+    [SuppressMessage("Performance", "CA1814:Prefer jagged arrays over multidimensional",
+        Justification = "Excel marshals a multi cell range as a rectangular variant array.")]
+    public static object?[,] ReadTable(Excel.ListObject table)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+
+        Excel.Range range = table.DataBodyRange
+            ?? throw new InvalidOperationException("Table " + table.Name + " has no data rows.");
+        try
+        {
+            object? value = range.Value2;
+
+            if (value is not object[,] grid)
+            {
+                // A single cell table yields the scalar value rather than a two dimensional array.
+                return new object?[1, 1] { { value } };
+            }
+
+            int firstRow = grid.GetLowerBound(0);
+            int firstColumn = grid.GetLowerBound(1);
+            int rowCount = grid.GetLength(0);
+            int columnCount = grid.GetLength(1);
+
+            var values = new object?[rowCount, columnCount];
+            for (int row = 0; row < rowCount; row++)
+            {
+                for (int column = 0; column < columnCount; column++)
+                {
+                    values[row, column] = grid[firstRow + row, firstColumn + column];
+                }
+            }
+
+            return values;
+        }
+        finally
+        {
+            ReleaseComObject(range);
         }
     }
 
@@ -484,9 +750,152 @@ public static class ExcelUtils
         return objects;
     }
 
+    /// <summary>
+    /// Gets the process ids of the Excel instances that are currently running.
+    /// </summary>
+    /// <returns>The process ids.</returns>
+    private static HashSet<int> GetExcelProcessIds()
+    {
+        var processIds = new HashSet<int>();
+
+        foreach (Process process in Process.GetProcessesByName(ExcelProcessName))
+        {
+            try
+            {
+                processIds.Add(process.Id);
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        }
+
+        return processIds;
+    }
+
+    /// <summary>
+    /// Resolves the id of the process hosting an Excel instance.
+    /// </summary>
+    /// <param name="excel">The Excel instance.</param>
+    /// <returns>The process id, or zero when it could not be resolved.</returns>
+    /// <remarks>
+    /// Excel exposes no process id of its own, so it is taken from the window the instance reports as its main window.
+    /// That window belongs to the instance's process by construction.
+    /// </remarks>
+    internal static int GetProcessId(Excel.Application excel)
+    {
+        ArgumentNullException.ThrowIfNull(excel);
+
+        try
+        {
+            IntPtr handle = new(excel.Hwnd);
+            if (handle == IntPtr.Zero)
+            {
+                return 0;
+            }
+
+            _ = GetWindowThreadProcessId(handle, out int processId);
+            return processId;
+        }
+        catch (COMException)
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// Quits an Excel instance, logging rather than throwing when it refuses.
+    /// </summary>
+    /// <param name="excel">The Excel instance to quit.</param>
+    internal static void TryQuit(Excel.Application excel)
+    {
+        ArgumentNullException.ThrowIfNull(excel);
+
+        try
+        {
+            excel.Quit();
+        }
+        catch (COMException ex)
+        {
+            Log.Logger.Warning("PFM_EXCEL_SHUTDOWN_FAILED: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Ends an Excel process that did not exit when it was asked to quit.
+    /// </summary>
+    /// <param name="processId">The id of the process the session started.</param>
+    /// <remarks>
+    /// Excel outlives a quit whenever a reference to one of its objects survives, and a sweep that leaks one instance
+    /// per job would exhaust the machine long before it finished.  Only a process this tool started and identified is
+    /// ever ended this way, and only after it has been asked to quit and given time to do so.
+    /// </remarks>
+    internal static void EndProcess(int processId)
+    {
+        Process process;
+        try
+        {
+            process = Process.GetProcessById(processId);
+        }
+        catch (ArgumentException)
+        {
+            // The process already exited, which is the outcome this method exists to reach.
+            return;
+        }
+
+        try
+        {
+            if (process.HasExited)
+            {
+                return;
+            }
+
+            Log.Logger.Warning("PFM_EXCEL_PROCESS_KILLED: process=" + Format(processId)
+                + " did not exit after being asked to quit.");
+            process.Kill();
+            process.WaitForExit(ProcessExitTimeoutMilliseconds);
+        }
+        catch (InvalidOperationException)
+        {
+            // The process exited between the checks above and the kill.
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            Log.Logger.Warning("PFM_EXCEL_PROCESS_KILL_FAILED: " + ex.Message);
+        }
+        finally
+        {
+            process.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Formats a count for a log or exception message.
+    /// </summary>
+    /// <param name="value">The value to format.</param>
+    /// <returns>The formatted value.</returns>
+    private static string Format(int value)
+    {
+        return value.ToString(CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// The name of the Excel process, as the process list reports it.
+    /// </summary>
+    private const string ExcelProcessName = "EXCEL";
+
+    /// <summary>
+    /// How long to wait for an Excel process to disappear after it has been ended.
+    /// </summary>
+    private const int ProcessExitTimeoutMilliseconds = 10_000;
+
     [DllImport("ole32.dll")]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static extern int CreateBindCtx(int reserved, out IBindCtx bindContext);
+
+    [DllImport("user32.dll")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static extern int GetWindowThreadProcessId(IntPtr windowHandle, out int processId);
 }
 
 /// <summary>
@@ -499,6 +908,7 @@ public sealed class ExcelSession : IDisposable
     private readonly Excel.Application _excel;
     private readonly Excel.Workbook _workbook;
     private readonly bool _startedExcel;
+    private readonly int _processId;
     private readonly Excel.XlCalculation _originalCalculation;
     private readonly bool _originalScreenUpdating;
     private readonly bool _originalEnableEvents;
@@ -512,11 +922,16 @@ public sealed class ExcelSession : IDisposable
     /// <param name="excel">The Excel application that hosts the workbook.</param>
     /// <param name="workbook">The workbook the session operates on.</param>
     /// <param name="startedExcel">True when this session started Excel and opened the workbook itself.</param>
-    internal ExcelSession(Excel.Application excel, Excel.Workbook workbook, bool startedExcel)
+    /// <param name="processId">
+    /// The id of the Excel process, when the session started it and knows which process that is; otherwise zero.  A
+    /// session that knows its process ends it if quitting leaves it running.
+    /// </param>
+    internal ExcelSession(Excel.Application excel, Excel.Workbook workbook, bool startedExcel, int processId = 0)
     {
         _excel = excel;
         _workbook = workbook;
         _startedExcel = startedExcel;
+        _processId = processId;
 
         _originalCalculation = excel.Calculation;
         _originalScreenUpdating = excel.ScreenUpdating;
@@ -535,6 +950,12 @@ public sealed class ExcelSession : IDisposable
     /// Indicates whether the workbook was already open in Excel when the session attached to it.
     /// </summary>
     public bool WasAlreadyOpen => !_startedExcel;
+
+    /// <summary>
+    /// Gets the id of the Excel process this session started, or zero when the session did not start Excel or could
+    /// not identify its process.
+    /// </summary>
+    public int ProcessId => _processId;
 
     /// <summary>
     /// Switches Excel to manual calculation and suppresses the screen updates, events and alerts that would otherwise
@@ -610,6 +1031,11 @@ public sealed class ExcelSession : IDisposable
             // The Excel process only exits once the wrappers this session handed out have been collected.
             GC.Collect();
             GC.WaitForPendingFinalizers();
+
+            if (_processId != 0)
+            {
+                ExcelUtils.EndProcess(_processId);
+            }
         }
     }
 
