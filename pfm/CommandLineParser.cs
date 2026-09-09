@@ -24,6 +24,8 @@ public class CommandLineParser
     private Commands _command;
     private string? _filePath;
     private bool _timing;
+    private int _jobCount = 1;
+    private int _jobIndex;
 
     private Arguments? _arguments;
 
@@ -108,9 +110,32 @@ public class CommandLineParser
             Aliases = { "-t" }
         };
 
+        var backTestCommand = new Command(BackTestCommand, "Projects the PortfolioManager workbook from every "
+            + "historical period long enough to project over, and records the outcome of each.");
+
+        // The job options belong to the sweeping commands rather than to the root: iterating or closing a period is
+        // one indivisible piece of work, so there is nothing for a slice of it to mean.
+        Option<int> jobCountOption = new("--job-count")
+        {
+            Description = "The number of jobs the sweep is being split across.  Defaults to one, which runs it whole.",
+            Required = false,
+            DefaultValueFactory = _ => 1
+        };
+
+        Option<int> jobIndexOption = new("--job-index")
+        {
+            Description = "The zero based index of the slice of the sweep this process runs.  Defaults to zero.",
+            Required = false,
+            DefaultValueFactory = _ => 0
+        };
+
+        backTestCommand.Options.Add(jobCountOption);
+        backTestCommand.Options.Add(jobIndexOption);
+
         rootCommand.Options.Add(filePathOption);
         rootCommand.Options.Add(timingOption);
         rootCommand.Subcommands.Add(iterateCommand);
+        rootCommand.Subcommands.Add(backTestCommand);
 
         rootCommand.Options.Remove(rootCommand.Options.OfType<VersionOption>().Single());
         HelpOption helpOption = rootCommand.Options.OfType<HelpOption>().Single();
@@ -126,7 +151,10 @@ public class CommandLineParser
         {
             _help = true;
             var helpWriter = new StringWriter();
-            rootCommand.Parse("-h").Invoke(new InvocationConfiguration { Output = helpWriter });
+
+            // Invoking the parse result rather than a fresh one for the root command is what makes "back-test -h"
+            // describe the back test command's own options, ex. --job-count, rather than only the root's.
+            parseResult.Invoke(new InvocationConfiguration { Output = helpWriter });
             _helpMessage = helpWriter.ToString();
         }
         else
@@ -135,6 +163,15 @@ public class CommandLineParser
             {
                 case IterateCommand:
                     _command = Commands.Iterate;
+                    break;
+                case BackTestCommand:
+                    _command = Commands.BackTest;
+
+                    // The job options belong to this command alone, so they are only in scope to be read here.  Asking
+                    // for one that the parsed command does not declare yields the type's default rather than the
+                    // option's, which for a job count would be zero.
+                    _jobCount = parseResult.GetValue(jobCountOption);
+                    _jobIndex = parseResult.GetValue(jobIndexOption);
                     break;
                 default:
                     SetError("Unknown command: " + parseResult.CommandResult.Command.Name);
@@ -154,12 +191,37 @@ public class CommandLineParser
             return;
         }
 
+        if (_jobCount < 1)
+        {
+            SetError("Invalid job count: " + Format(_jobCount) + ". A sweep must be split across at least one job.");
+            return;
+        }
+
+        if (_jobIndex < 0 || _jobIndex >= _jobCount)
+        {
+            SetError("Invalid job index: " + Format(_jobIndex) + ". The index must be at least zero and less than the "
+                + "job count of " + Format(_jobCount) + ".");
+            return;
+        }
+
         _arguments = new Arguments
         {
             Command = _command,
             FilePath = _filePath,
-            Timing = _timing
+            Timing = _timing,
+            JobCount = _jobCount,
+            JobIndex = _jobIndex
         };
+    }
+
+    /// <summary>
+    /// Formats a count for an error message.
+    /// </summary>
+    /// <param name="value">The value to format.</param>
+    /// <returns>The formatted value.</returns>
+    private static string Format(int value)
+    {
+        return value.ToString(System.Globalization.CultureInfo.InvariantCulture);
     }
 
     /// <summary>

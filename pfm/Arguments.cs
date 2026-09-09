@@ -20,4 +20,20 @@ public class Arguments
     /// asked for it, ex. to find out where a slow run spent its time.
     /// </summary>
     public bool Timing { get; init; }
+
+    /// <summary>
+    /// The number of jobs a simulation sweep is split across.  One means the sweep is not being run in parallel.
+    /// </summary>
+    /// <remarks>
+    /// A sweep takes hours, so it is divided into slices that run as separate processes.  Every job of one sweep is
+    /// given the same job count and its own job index; nothing coordinates them beyond that, so they may be started on
+    /// one machine or several.
+    /// </remarks>
+    public int JobCount { get; init; } = 1;
+
+    /// <summary>
+    /// The zero based index of the slice of a simulation sweep this process runs.  It is less than
+    /// <see cref="JobCount"/>.
+    /// </summary>
+    public int JobIndex { get; init; }
 }
