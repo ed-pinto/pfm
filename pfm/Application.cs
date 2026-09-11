@@ -14,7 +14,9 @@ public static class Application
 
         var commandLineParser = new CommandLineParser(args);
 
-        InitializeLogging(commandLineParser.Configuration, commandLineParser.Arguments);
+        // The arguments are read through the accessor that tolerates their absence, because a run that failed to parse
+        // or that only asked for help still has to be able to report that, which it does through the log.
+        InitializeLogging(commandLineParser.Configuration, commandLineParser.ArgumentsOrDefault);
 
         if (commandLineParser.Error)
         {
@@ -28,7 +30,10 @@ public static class Application
             return 0;
         }
 
-        Log.Logger.Information("PFM_FILE_NAME: " + commandLineParser.Arguments.FilePath);
+        if (commandLineParser.Arguments.FilePath is string filePath)
+        {
+            Log.Logger.Information("PFM_FILE_NAME: " + filePath);
+        }
 
         return Dispatch(commandLineParser.Arguments, output, error);
     }
@@ -46,8 +51,9 @@ public static class Application
         {
             Commands.Iterate => Operations.Iterate(arguments, output, error),
             Commands.ClosePeriod => NotImplemented(arguments.Command, error),
-            Commands.MonteCarlo => NotImplemented(arguments.Command, error),
+            Commands.MonteCarlo => Operations.MonteCarlo(arguments, output, error),
             Commands.BackTest => Operations.BackTest(arguments, output, error),
+            Commands.Coalesce => Operations.Coalesce(arguments, output, error),
             _ => NotImplemented(arguments.Command, error)
         };
     }

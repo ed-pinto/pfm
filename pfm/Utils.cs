@@ -50,4 +50,43 @@ public static class Utils
         catch (NotSupportedException) { return false; } // e.g. malformed drive/colon usage
         catch (System.Security.SecurityException) { return false; }
     }
+
+    /// <summary>
+    /// Validates whether the specified path is structurally valid and points to a directory that exists.
+    /// </summary>
+    /// <param name="path">The path to validate.</param>
+    /// <returns>True if the path is valid and the directory exists; otherwise, false.</returns>
+    public static bool IsValidDirectoryPath([NotNullWhen(true)] string? path)
+    {
+        return IsValidNewDirectoryPath(path) && Directory.Exists(Path.GetFullPath(path));
+    }
+
+    /// <summary>
+    /// Validates whether the specified path is structurally valid as a directory, whether or not it exists yet.
+    /// </summary>
+    /// <param name="path">The path to validate.</param>
+    /// <returns>True if the path is one a directory could be addressed by; otherwise, false.</returns>
+    /// <remarks>
+    /// An output directory is created by the command that writes into it, so its path is checked for being expressible
+    /// rather than for already existing.
+    /// </remarks>
+    public static bool IsValidNewDirectoryPath([NotNullWhen(true)] string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+
+        if (path.IndexOfAny(Path.GetInvalidPathChars()) >= 0)
+            return false;
+
+        try
+        {
+            // GetFullPath throws for structurally invalid paths, which is what this is asking about.
+            Path.GetFullPath(path);
+            return true;
+        }
+        catch (ArgumentException) { return false; }
+        catch (PathTooLongException) { return false; }
+        catch (NotSupportedException) { return false; }
+        catch (System.Security.SecurityException) { return false; }
+    }
 }

@@ -11,8 +11,8 @@ namespace Pfm;
 public enum Commands
 {
     /// <summary>
-    /// Iterates calculations in the PortfolioManager workbook which require iterative updates.
-    /// Ex. 15_TaxPayments.TaxProvision.
+    /// Iterates the materialized series of the PortfolioManager workbook until each agrees with the live value it
+    /// stands for.  Ex. 15_TaxPayments.TaxProvision and 16_PortfolioState.PortfolioState.
     /// </summary>
     [EnumMember(Value = "Iterate")]
     Iterate,
@@ -35,6 +35,13 @@ public enum Commands
     /// </summary>
     [EnumMember(Value = "BackTest")]
     BackTest,
+
+    /// <summary>
+    /// Gathers the run directories of one simulation sweep into a single Excel workbook: the configuration the sweep
+    /// exercised on one sheet, and the concatenated results of every job on another.
+    /// </summary>
+    [EnumMember(Value = "Coalesce")]
+    Coalesce,
 
     /// <summary>
     /// There are many configurations in the workbook affected by the year in which tax residency changes to Canada.

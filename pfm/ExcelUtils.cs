@@ -115,6 +115,191 @@ public static class ExcelUtils
     }
 
     /// <summary>
+    /// Creates an empty workbook in an Excel instance of its own.
+    /// </summary>
+    /// <returns>
+    /// A session that owns the new instance and workbook.  The workbook has never been saved, so a caller that wants
+    /// to keep it must call <see cref="ExcelSession.SaveAs"/> before disposing the session, which otherwise closes it
+    /// without saving.
+    /// </returns>
+    /// <remarks>
+    /// The instance is started rather than attached to for the same reason a simulation starts its own: a workbook
+    /// added to whatever Excel the user happens to have open would appear in front of them, and the settings this
+    /// session suspends would be theirs to have disturbed.  Asking for the one worksheet template rather than deleting
+    /// the surplus sheets afterwards is what keeps the workbook's shape independent of the machine's Excel settings.
+    /// </remarks>
+    public static ExcelSession CreateWorkbook()
+    {
+        HashSet<int> existing = GetExcelProcessIds();
+
+        var excel = new Excel.Application
+        {
+            Visible = false,
+            DisplayAlerts = false,
+            AskToUpdateLinks = false
+        };
+
+        int processId = GetProcessId(excel);
+
+        if (processId != 0 && existing.Contains(processId))
+        {
+            TryQuit(excel);
+            ReleaseComObject(excel);
+
+            throw new InvalidOperationException("Excel did not start in a process of its own; it reused process "
+                + Format(processId) + ".  A new workbook cannot be built in an Excel process that is already in use.");
+        }
+
+        Log.Logger.Information("PFM_EXCEL_CREATED: process=" + Format(processId));
+
+        Excel.Workbooks workbooks = excel.Workbooks;
+        try
+        {
+            Excel.Workbook created = workbooks.Add(Excel.XlWBATemplate.xlWBATWorksheet);
+            return new ExcelSession(excel, created, startedExcel: true, processId: processId);
+        }
+        finally
+        {
+            ReleaseComObject(workbooks);
+        }
+    }
+
+    /// <summary>
+    /// Gets a worksheet of the workbook by its position.
+    /// </summary>
+    /// <param name="workbook">The workbook to read.</param>
+    /// <param name="index">The one based position of the worksheet.</param>
+    /// <returns>The worksheet.</returns>
+    /// <remarks>
+    /// A workbook Excel has just created names its worksheet in the language of the installation, ex. Feuil1 rather
+    /// than Sheet1, so the sheet that is about to be renamed has to be reached by position rather than by name.
+    /// </remarks>
+    public static Excel.Worksheet GetWorksheet(Excel.Workbook workbook, int index)
+    {
+        ArgumentNullException.ThrowIfNull(workbook);
+
+        Excel.Sheets worksheets = workbook.Worksheets;
+        try
+        {
+            return (Excel.Worksheet)worksheets[index];
+        }
+        catch (COMException ex)
+        {
+            throw new InvalidOperationException("The workbook has no worksheet at position " + Format(index) + ".",
+                ex);
+        }
+        finally
+        {
+            ReleaseComObject(worksheets);
+        }
+    }
+
+    /// <summary>
+    /// Adds a worksheet to the end of the workbook.
+    /// </summary>
+    /// <param name="workbook">The workbook to add to.</param>
+    /// <param name="worksheetName">The name to give the worksheet.</param>
+    /// <returns>The worksheet that was added.</returns>
+    public static Excel.Worksheet AddWorksheet(Excel.Workbook workbook, string worksheetName)
+    {
+        ArgumentNullException.ThrowIfNull(workbook);
+        ArgumentNullException.ThrowIfNull(worksheetName);
+
+        Excel.Sheets worksheets = workbook.Worksheets;
+        Excel.Worksheet? last = null;
+        try
+        {
+            last = (Excel.Worksheet)worksheets[worksheets.Count];
+            var added = (Excel.Worksheet)worksheets.Add(After: last);
+            added.Name = worksheetName;
+            return added;
+        }
+        catch (COMException ex)
+        {
+            throw new InvalidOperationException("Worksheet " + worksheetName + " could not be added to the workbook.",
+                ex);
+        }
+        finally
+        {
+            ReleaseComObject(last);
+            ReleaseComObject(worksheets);
+        }
+    }
+
+    /// <summary>
+    /// Writes a rectangular block of values into a worksheet.
+    /// </summary>
+    /// <param name="worksheet">The worksheet to write into.</param>
+    /// <param name="firstRow">The one based row the block starts at.</param>
+    /// <param name="firstColumn">The one based column the block starts at.</param>
+    /// <param name="values">The values to write, indexed by row and then by column.  Null leaves a cell empty.</param>
+    /// <remarks>
+    /// The block is assigned to the range in one cross process call, which is what makes importing thousands of rows
+    /// cost seconds rather than minutes; writing a cell at a time would be one call per cell.
+    /// </remarks>
+    [SuppressMessage("Performance", "CA1814:Prefer jagged arrays over multidimensional",
+        Justification = "Excel marshals a multi cell range as a rectangular variant array.")]
+    public static void WriteGrid(Excel.Worksheet worksheet, int firstRow, int firstColumn, object?[,] values)
+    {
+        ArgumentNullException.ThrowIfNull(worksheet);
+        ArgumentNullException.ThrowIfNull(values);
+
+        int rowCount = values.GetLength(0);
+        int columnCount = values.GetLength(1);
+
+        if (rowCount == 0 || columnCount == 0)
+        {
+            return;
+        }
+
+        Excel.Range? first = null;
+        Excel.Range? last = null;
+        Excel.Range? block = null;
+        try
+        {
+            first = (Excel.Range)worksheet.Cells[firstRow, firstColumn];
+            last = (Excel.Range)worksheet.Cells[firstRow + rowCount - 1, firstColumn + columnCount - 1];
+            block = worksheet.Range[first, last];
+            block.Value2 = values;
+        }
+        finally
+        {
+            ReleaseComObject(block);
+            ReleaseComObject(last);
+            ReleaseComObject(first);
+        }
+    }
+
+    /// <summary>
+    /// Formats a column of a worksheet as text, so that Excel stores what is written into it verbatim.
+    /// </summary>
+    /// <param name="worksheet">The worksheet whose column is being formatted.</param>
+    /// <param name="column">The one based column to format.</param>
+    /// <remarks>
+    /// A line of prose that happens to begin with an equals sign, or that reads like a date, would otherwise be taken
+    /// as a formula or converted as it was written.  The synopsis is a report to be read back exactly as the workbook
+    /// wrote it, so the column it lands in says so before anything is written to it.
+    /// </remarks>
+    public static void FormatColumnAsText(Excel.Worksheet worksheet, int column)
+    {
+        ArgumentNullException.ThrowIfNull(worksheet);
+
+        Excel.Range? columns = null;
+        Excel.Range? target = null;
+        try
+        {
+            columns = worksheet.Columns;
+            target = (Excel.Range)columns[column];
+            target.NumberFormat = "@";
+        }
+        finally
+        {
+            ReleaseComObject(target);
+            ReleaseComObject(columns);
+        }
+    }
+
+    /// <summary>
     /// Gets the value a defined name resolves to, whatever kind of name it is.
     /// </summary>
     /// <param name="workbook">The workbook that defines the name.</param>
@@ -272,6 +457,67 @@ public static class ExcelUtils
         }
 
         return indexes;
+    }
+
+    /// <summary>
+    /// Counts the columns of a table.
+    /// </summary>
+    /// <param name="table">The table to measure.</param>
+    /// <returns>The number of columns, including any the caller does not read.</returns>
+    /// <remarks>
+    /// This asks Excel for the count rather than enumerating the columns, which is what makes it usable on a table as
+    /// wide as MCSeeds: describing that one through <see cref="GetColumnIndexes"/> would be a thousand cross process
+    /// calls to learn one number.
+    /// </remarks>
+    public static int GetColumnCount(Excel.ListObject table)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+
+        Excel.ListColumns? columns = null;
+        try
+        {
+            columns = table.ListColumns;
+            return columns.Count;
+        }
+        finally
+        {
+            ReleaseComObject(columns);
+        }
+    }
+
+    /// <summary>
+    /// Gets the one based position of the named column within a table.
+    /// </summary>
+    /// <param name="table">The table that contains the column.</param>
+    /// <param name="columnName">The header text of the column.</param>
+    /// <returns>The position, which is the one an INDEX over the table's data body addresses the column by.</returns>
+    public static int GetColumnPosition(Excel.ListObject table, string columnName)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+
+        Excel.ListColumns? columns = null;
+        Excel.ListColumn? column = null;
+        try
+        {
+            columns = table.ListColumns;
+
+            try
+            {
+                column = columns[columnName];
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException("Column " + columnName + " was not found in table " + table.Name
+                    + ".", ex);
+            }
+
+            return column.Index;
+        }
+        finally
+        {
+            ReleaseComObject(column);
+            ReleaseComObject(columns);
+        }
     }
 
     /// <summary>
@@ -1000,6 +1246,29 @@ public sealed class ExcelSession : IDisposable
         _workbook.Save();
         Log.Logger.Information("PFM_EXCEL_SAVED: " + _workbook.FullName + " (already open in Excel: "
             + WasAlreadyOpen + ")");
+    }
+
+    /// <summary>
+    /// Saves the workbook to a path it has not been saved to before, first returning the calculation mode to what it
+    /// was when the session started.
+    /// </summary>
+    /// <param name="path">The path to save the workbook to.</param>
+    /// <remarks>
+    /// The format is stated rather than inferred, because a workbook Excel created has no format of its own to keep
+    /// and would otherwise be saved in whatever the installation defaults to.  Excel persists the application
+    /// calculation mode into the workbook, so the mode is restored first for the same reason <see cref="Save"/>
+    /// restores it: a workbook saved while calculation is suspended opens in manual calculation.
+    /// </remarks>
+    public void SaveAs(string path)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+
+        Restore(() => _excel.Calculation = _originalCalculation);
+
+        _workbook.SaveAs(Filename: Path.GetFullPath(path),
+            FileFormat: Excel.XlFileFormat.xlOpenXMLWorkbook);
+
+        Log.Logger.Information("PFM_EXCEL_SAVED_AS: " + _workbook.FullName);
     }
 
     /// <summary>
