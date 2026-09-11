@@ -7,8 +7,8 @@ using Excel = Microsoft.Office.Interop.Excel;
 namespace Pfm;
 
 /// <summary>
-/// What one simulation produced: the per year outcome metrics harvested from 56_Summary, and how the tax provision
-/// behind them settled.
+/// What one simulation produced: the per year outcome metrics harvested from 56_Summary, and how the materialized
+/// series behind them settled.
 /// </summary>
 public sealed class SimulationRecord
 {
@@ -19,14 +19,15 @@ public sealed class SimulationRecord
     public required int Index { get; init; }
 
     /// <summary>
-    /// Gets the year of 21_EconomyHistorical the projection was driven from.
+    /// Gets what the simulation was driven from, in the order the sweep states its identity columns: the start year
+    /// and semester of a back test, the iteration of a Monte Carlo campaign.
     /// </summary>
-    public required int StartYear { get; init; }
-
-    /// <summary>
-    /// Gets the semester of <see cref="StartYear"/> the projection was driven from.
-    /// </summary>
-    public required int StartSemester { get; init; }
+    /// <remarks>
+    /// The index above says where a simulation sits in its sweep, and this says what the sweep made of it.  It is
+    /// stated by <see cref="SweepPlan.Identify"/> rather than named here, because it is the one part of a result that
+    /// differs between the sweeps.
+    /// </remarks>
+    public required IReadOnlyList<int> Identity { get; init; }
 
     /// <summary>
     /// Gets the harvested values, indexed by data element and then by simulated year.  A value that was not a number,
@@ -35,9 +36,9 @@ public sealed class SimulationRecord
     public required IReadOnlyList<double?[]> Elements { get; init; }
 
     /// <summary>
-    /// Gets how the tax provision of this simulation settled.
+    /// Gets how the materialized series of this simulation settled.
     /// </summary>
-    public required TaxProvisionOutcome TaxProvision { get; init; }
+    public required ConvergenceOutcome Convergence { get; init; }
 }
 
 /// <summary>
@@ -70,10 +71,12 @@ public sealed class SummaryHarvester : IDisposable
     /// </remarks>
     public static readonly IReadOnlyList<string> DataElements =
     [
-        "InflationIndex",
         "NetIncome",
+        "NetIncomeCurrentDollars",
         "EndingPortfolioValue",
+        "EndingPortfolioValueCurrentDollars",
         "TotalTax",
+        "TotalTaxCurrentDollars",
         "PortfolioConsumedRatio",
         "RatioBondCash",
         "RatioBondLadder",
@@ -257,8 +260,9 @@ public sealed class SummaryHarvester : IDisposable
 /// </summary>
 /// <remarks>
 /// The layout puts one column per simulated year and repeats that run of columns for each data element, so an element
-/// reads across as a contiguous block of years.  The columns describing how the tax provision settled follow the year
-/// blocks, and the columns identifying the simulation lead them.
+/// reads across as a contiguous block of years.  The columns describing how the materialized series settled follow the
+/// year blocks, and the columns identifying the simulation lead them: the sweep wide index first, then whatever the
+/// sweep was driven by, ex. StartYear and StartSemester for a back test and MCIteration for a Monte Carlo campaign.
 /// <para>
 /// The results exist to be read back into Excel, so every value is written in a form that survives the round trip: the
 /// invariant culture throughout, no grouping separators, no currency or percent formatting, the shortest representation
@@ -273,8 +277,10 @@ public sealed class SummaryHarvester : IDisposable
 public sealed class SimulationResultWriter : IDisposable
 {
     private readonly StreamWriter _writer;
+    private readonly int _identityCount;
     private readonly int _elementCount;
     private readonly int _yearCount;
+    private readonly IReadOnlyList<string> _series;
 
     private bool _disposed;
 
@@ -282,16 +288,23 @@ public sealed class SimulationResultWriter : IDisposable
     /// Initializes a new instance of the <see cref="SimulationResultWriter"/> class and writes the header row.
     /// </summary>
     /// <param name="path">The path of the file to write.</param>
+    /// <param name="identity">What each simulation was driven from, in column order, ex. StartYear.</param>
     /// <param name="elements">The data elements each simulation reports, in column order.</param>
     /// <param name="years">The simulated years each data element reports, in column order.</param>
-    public SimulationResultWriter(string path, IReadOnlyList<string> elements, IReadOnlyList<int> years)
+    /// <param name="series">The materialized series each simulation reports the drift of, in column order.</param>
+    public SimulationResultWriter(string path, IReadOnlyList<string> identity, IReadOnlyList<string> elements,
+        IReadOnlyList<int> years, IReadOnlyList<string> series)
     {
         ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(identity);
         ArgumentNullException.ThrowIfNull(elements);
         ArgumentNullException.ThrowIfNull(years);
+        ArgumentNullException.ThrowIfNull(series);
 
+        _identityCount = identity.Count;
         _elementCount = elements.Count;
         _yearCount = years.Count;
+        _series = series;
 
         // No byte order mark: the content is entirely ASCII, and a mark only risks being read as data by an importer
         // that does not expect one.  CRLF is what Excel writes and expects on this platform.
@@ -301,7 +314,7 @@ public sealed class SimulationResultWriter : IDisposable
             NewLine = "\r\n"
         };
 
-        WriteHeader(elements, years);
+        WriteHeader(identity, elements, years, series);
     }
 
     /// <summary>
@@ -313,18 +326,30 @@ public sealed class SimulationResultWriter : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(record);
 
+        if (record.Identity.Count != _identityCount)
+        {
+            throw new ArgumentException("The simulation reported " + Format(record.Identity.Count)
+                + " identifying values rather than " + Format(_identityCount) + ".", nameof(record));
+        }
+
         if (record.Elements.Count != _elementCount)
         {
             throw new ArgumentException("The simulation reported " + Format(record.Elements.Count)
                 + " data elements rather than " + Format(_elementCount) + ".", nameof(record));
         }
 
-        var fields = new List<string>((_elementCount * _yearCount) + 6)
+        if (record.Convergence.Series.Count != _series.Count)
         {
-            Format(record.Index),
-            Format(record.StartYear),
-            Format(record.StartSemester)
+            throw new ArgumentException("The simulation reported " + Format(record.Convergence.Series.Count)
+                + " materialized series rather than " + Format(_series.Count) + ".", nameof(record));
+        }
+
+        var fields = new List<string>((_elementCount * _yearCount) + _identityCount + _series.Count + 3)
+        {
+            Format(record.Index)
         };
+
+        fields.AddRange(record.Identity.Select(Format));
 
         foreach (double?[] values in record.Elements)
         {
@@ -337,9 +362,9 @@ public sealed class SimulationResultWriter : IDisposable
             fields.AddRange(values.Select(Format));
         }
 
-        fields.Add(Format(record.TaxProvision.Passes));
-        fields.Add(Format(record.TaxProvision.Drift));
-        fields.Add(Format(record.TaxProvision.WithinTolerance));
+        fields.Add(Format(record.Convergence.Passes));
+        fields.AddRange(record.Convergence.Series.Select(series => Format(series.Drift)));
+        fields.Add(Format(record.Convergence.WithinTolerance));
 
         _writer.WriteLine(string.Join(',', fields));
     }
@@ -360,18 +385,26 @@ public sealed class SimulationResultWriter : IDisposable
 
     /// <summary>
     /// Writes the header row: the columns identifying the simulation, then one block of years per data element, then
-    /// the columns describing how the tax provision settled.
+    /// the columns describing how the materialized series settled.
     /// </summary>
+    /// <param name="identity">What each simulation was driven from.</param>
     /// <param name="elements">The data elements each simulation reports.</param>
     /// <param name="years">The simulated years each data element reports.</param>
-    private void WriteHeader(IReadOnlyList<string> elements, IReadOnlyList<int> years)
+    /// <param name="series">The materialized series each simulation reports the drift of.</param>
+    /// <remarks>
+    /// The pass count is shared and the tolerance flag is aggregate, because one loop settles every series together
+    /// and a simulation is only usable when all of them settled.  The drift is per series: it is the one quantity that
+    /// says which of them was the hard one.
+    /// </remarks>
+    private void WriteHeader(IReadOnlyList<string> identity, IReadOnlyList<string> elements, IReadOnlyList<int> years,
+        IReadOnlyList<string> series)
     {
-        var headers = new List<string>((elements.Count * years.Count) + 6)
+        var headers = new List<string>((elements.Count * years.Count) + identity.Count + series.Count + 3)
         {
-            "SimulationIndex",
-            "StartYear",
-            "StartSemester"
+            "SimulationIndex"
         };
+
+        headers.AddRange(identity);
 
         foreach (string element in elements)
         {
@@ -379,7 +412,7 @@ public sealed class SimulationResultWriter : IDisposable
         }
 
         headers.Add("ConvergencePasses");
-        headers.Add("FinalTaxDrift");
+        headers.AddRange(series.Select(name => "Final" + name + "Drift"));
         headers.Add("DriftWithinTolerance");
 
         _writer.WriteLine(string.Join(',', headers));

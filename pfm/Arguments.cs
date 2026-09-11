@@ -11,9 +11,20 @@ public class Arguments
     public required Commands Command { get; init; }
 
     /// <summary>
-    /// The file path to the PortfolioManager.xlsx file on which to operate.
+    /// The file path to the PortfolioManager.xlsx file on which to operate, or null for a command that does not
+    /// operate on a workbook, ex. <see cref="Commands.Coalesce"/>.
     /// </summary>
-    public required string FilePath { get; init; }
+    public string? FilePath { get; init; }
+
+    /// <summary>
+    /// The directory holding the run directories of the sweep being coalesced.  Defaults to the current directory.
+    /// </summary>
+    public string InputPath { get; init; } = "./";
+
+    /// <summary>
+    /// The directory the coalesced workbook is written to.  Defaults to output under the current directory.
+    /// </summary>
+    public string OutputPath { get; init; } = "./output";
 
     /// <summary>
     /// Indicates whether the operation should report how long each of its phases took.  This is off unless the caller
@@ -36,4 +47,14 @@ public class Arguments
     /// <see cref="JobCount"/>.
     /// </summary>
     public int JobIndex { get; init; }
+
+    /// <summary>
+    /// The greatest number of simulations the whole sweep runs, or null when it runs every one the workbook offers.
+    /// </summary>
+    /// <remarks>
+    /// This shortens the sweep, ex. to the first hundred iterations of a Monte Carlo campaign, rather than limiting
+    /// what a job does: a sweep of a hundred split across four jobs is still a hundred simulations.  It is what makes
+    /// a trial run of a sweep that takes hours cost minutes instead.
+    /// </remarks>
+    public int? SimulationCount { get; init; }
 }
