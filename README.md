@@ -52,10 +52,39 @@ under the current directory, copies the workbook into it, drives the copy in an 
 
 ### Run configuration
 
-Before the first simulation, the job writes `RunConfiguration.txt` into its run directory: one line for each row of
-the `Synopsis` table on `00_Overview`, which is where the workbook states the configuration a run exercises. The copy
-of the workbook is deleted when the job ends, so this is what a results file is read against afterwards. Writing it
-first also means an interrupted sweep still says what it was running.
+Before the first simulation, the job records the configuration of the workbook it is about to drive. The copy of the
+workbook is deleted when the job ends, so this is what a results file is read against afterwards. Writing it first also
+means an interrupted sweep still says what it was running.
+
+It is recorded twice, because the two forms are for different readers:
+
+`RunConfiguration.txt` is the synopsis, one line for each row of the `Synopsis` table on `00_Overview`, which is where
+the workbook states its configuration as prose.
+
+Beside it, one CSV file per table of the plan itself, written as values rather than sentences, so that the tables can
+be sorted, filtered and compared column by column:
+
+| File | Copied from |
+| --- | --- |
+| `RunConfiguration.Expenditures.csv` | `Expenditures` on `52_Expenditures` |
+| `RunConfiguration.TargetNetIncomeEras.csv` | `TargetNetIncomeEras` on `51_Targets` |
+| `RunConfiguration.AllocationTargets.csv` | `AllocationTargets` on `13_Allocations` |
+| `RunConfiguration.AllocationFloors.csv` | `AllocationFloors` on `13_Allocations` |
+| `RunConfiguration.DirectedDraws.csv` | `DirectedDraws` on `13_Allocations` |
+| `RunConfiguration.Parameters.csv` | The defined names below, as `Name` and `Value` |
+
+Each table is copied whole, with the headings the workbook gives its columns and the values it last calculated. A table
+the plan left empty is written as its heading row alone, which is what distinguishes a plan that directs no draws from
+a sweep whose configuration was never recorded.
+
+`Parameters` is the same idea for the scalar parameters, which `10_Parameters` states as defined names rather than as a
+table: `CdnResidencyYear`, `YearlyMaxDisposal`, `EquityGainsRebalanceThreshold`, `ConsumptionStressStart`,
+`ConsumptionStressFull`, `BootstrapBlockYears` and `BootstrapMatchPool`. A name the workbook does not define fails the
+run rather than being recorded empty, so a sweep that takes hours cannot leave an incomplete record of what it ran.
+
+The files are written the way the results are, and read back the same way: the invariant culture throughout, `TRUE` or
+`FALSE` for a flag, and an empty field for an empty cell. A line break inside a cell, ex. a note typed with `Alt+Enter`,
+becomes a space.
 
 ### Running a sweep in parallel
 
@@ -141,7 +170,7 @@ is the zero based position within the sweep, as it is for a back test, and `MCIt
 to 100 and leaves the other 900 paths unrun. See [Running part of a sweep](#running-part-of-a-sweep).
 
 Everything else is what the back test does, and is described above: the command copies the workbook rather than
-driving the one you point it at, writes [`RunConfiguration.txt`](#run-configuration) into the run directory before the
+driving the one you point it at, records [the run configuration](#run-configuration) in the run directory before the
 first simulation, is [split across jobs](#running-a-sweep-in-parallel) the same way, and writes the same
 [results](#results) but for the identifying columns, which are `SimulationIndex` and `MCIteration` rather than
 `SimulationIndex`, `StartYear` and `StartSemester`. The results file is `montecarlo.<yyyyMMddHHmm>.<index>_of_<count>.csv`.
@@ -178,15 +207,17 @@ the job count they agree on that identifies the sweep.
 ### The workbook
 
 The workbook is written as `<output-path>/PortfolioSimAnalysis.<run-id>.xlsx`, where the run id is eight hexadecimal
-characters derived from `RunConfiguration.txt` and the run directory names. The configuration is most of what the
-identifier is for, since it is the plan the sweep exercised and what a reader comparing two of these workbooks is
-comparing; the directory names are folded in as well, because the configuration alone would give one name to two sweeps
-of an unchanged plan and the second would be written over the first. Coalescing the same sweep twice therefore produces
-the same name, and an existing workbook of that name is reported rather than replaced.
+characters derived from [the run configuration](#run-configuration) and the run directory names. The configuration is
+most of what the identifier is for, since it is the plan the sweep exercised and what a reader comparing two of these
+workbooks is comparing; both the synopsis and the tables are folded in, because the synopsis is a summary and two plans
+that differ only in a row it does not spell out are still two plans. The directory names are folded in as well, because
+the configuration alone would give one name to two sweeps of an unchanged plan and the second would be written over the
+first. Coalescing the same sweep twice therefore produces the same name, and an existing workbook of that name is
+reported rather than replaced.
 
 | Sheet | Contents |
 | --- | --- |
-| `RunConfiguration` | The lines of `RunConfiguration.txt`, one per row of column A, read from the first job. Every job of a sweep drives a copy of one workbook, so they all record the same configuration. The column is formatted as text so the synopsis reads back exactly as the workbook wrote it. |
+| `RunConfiguration` | The configuration the sweep was driven from, read from the first job: the synopsis at the top, one line per row of column A, and then each of the [configuration tables](#run-configuration) beneath it, stacked down the sheet with a blank row between them. Every job of a sweep drives a copy of one workbook, so they all record the same configuration. The synopsis cells are formatted as text so that it reads back exactly as the workbook wrote it; each table is labelled with its name and defined as an Excel table, so it can be filtered and referred to by name. |
 | `BackTestData` or `MonteCarloData` | The header row once, then the data rows of every job in job index order, which is the order that reproduces what a single job would have written. The sheet is named after the simulation that produced the results. |
 
 Fields are imported as the types they were written from: numbers as numbers, `TRUE` and `FALSE` as booleans, and an

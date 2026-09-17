@@ -90,17 +90,27 @@ public sealed class CoalescedSweep
         RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture);
 
     /// <summary>
+    /// The number of rows of a configuration table read per call.  These tables are the eras and line items a person
+    /// maintains by hand, so one call reads any of them whole; the loop that uses this is there to be right about a
+    /// larger one rather than because one is expected.
+    /// </summary>
+    private const int ConfigurationBlockRows = 1000;
+
+    /// <summary>
     /// Initializes a new instance of the <see cref="CoalescedSweep"/> class.
     /// </summary>
     /// <param name="jobs">The jobs of the sweep, in job index order.</param>
     /// <param name="testType">The canonical name of the simulation the sweep ran.</param>
     /// <param name="runConfiguration">The lines of the configuration the sweep was driven from.</param>
+    /// <param name="configurationTables">The structured tables of that configuration.</param>
     /// <param name="runId">The identifier the coalesced workbook is named for.</param>
-    private CoalescedSweep(IReadOnlyList<SweepJob> jobs, string testType, string[] runConfiguration, string runId)
+    private CoalescedSweep(IReadOnlyList<SweepJob> jobs, string testType, string[] runConfiguration,
+        IReadOnlyList<ConfigurationTable> configurationTables, string runId)
     {
         Jobs = jobs;
         TestType = testType;
         RunConfiguration = runConfiguration;
+        ConfigurationTables = configurationTables;
         RunId = runId;
     }
 
@@ -119,6 +129,11 @@ public sealed class CoalescedSweep
     /// Gets the lines of the configuration the sweep was driven from, as the first job recorded it.
     /// </summary>
     public IReadOnlyList<string> RunConfiguration { get; }
+
+    /// <summary>
+    /// Gets the structured tables of that configuration, in <see cref="Pfm.RunConfiguration.TableNames"/> order.
+    /// </summary>
+    public IReadOnlyList<ConfigurationTable> ConfigurationTables { get; }
 
     /// <summary>
     /// Gets the eight character identifier of this sweep, which the coalesced workbook is named for.
@@ -147,13 +162,14 @@ public sealed class CoalescedSweep
         List<SweepJob> jobs = FindJobs(fullPath);
 
         string[] runConfiguration = ReadRunConfiguration(jobs[0]);
-        string runId = ComputeRunId(jobs, runConfiguration);
+        List<ConfigurationTable> configurationTables = ReadConfigurationTables(jobs[0]);
+        string runId = ComputeRunId(jobs, runConfiguration, configurationTables);
         string testType = TestTypes[TestTypeOf(jobs[0])];
 
         Log.Logger.Information("PFM_COALESCE_SWEEP: input=" + fullPath + " testType=" + testType + " jobs="
-            + Format(jobs.Count) + " runId=" + runId);
+            + Format(jobs.Count) + " tables=" + Format(configurationTables.Count) + " runId=" + runId);
 
-        return new CoalescedSweep(jobs, testType, runConfiguration, runId);
+        return new CoalescedSweep(jobs, testType, runConfiguration, configurationTables, runId);
     }
 
     /// <summary>
@@ -351,26 +367,105 @@ public sealed class CoalescedSweep
     }
 
     /// <summary>
+    /// Reads the structured tables of the configuration the sweep was driven from, as the first job recorded them.
+    /// </summary>
+    /// <param name="job">The first job of the sweep.</param>
+    /// <returns>The tables, in <see cref="Pfm.RunConfiguration.TableNames"/> order.</returns>
+    /// <remarks>
+    /// The tables are read by name rather than by listing the directory, so they are stacked in the coalesced workbook
+    /// in a stated order and a file that is not there is reported rather than quietly dropped from the record.
+    /// </remarks>
+    private static List<ConfigurationTable> ReadConfigurationTables(SweepJob job)
+    {
+        var tables = new List<ConfigurationTable>(Pfm.RunConfiguration.TableNames.Count);
+
+        foreach (string name in Pfm.RunConfiguration.TableNames)
+        {
+            string fileName = Pfm.RunConfiguration.TableFileName(name);
+            string path = Path.Combine(job.Directory, fileName);
+
+            if (!File.Exists(path))
+            {
+                throw new InvalidOperationException("The run directory " + job.Directory + " holds no " + fileName
+                    + ".  A job writes one file per configuration table before its first simulation, so a directory "
+                    + "without them is not a sweep this tool produced.");
+            }
+
+            tables.Add(ReadConfigurationTable(name, path));
+        }
+
+        return tables;
+    }
+
+    /// <summary>
+    /// Reads one configuration table back from the file a job wrote it to.
+    /// </summary>
+    /// <param name="name">The name the table is recorded under.</param>
+    /// <param name="path">The path of the file.</param>
+    /// <returns>The table.</returns>
+    /// <remarks>
+    /// These are read with the reader the results are read with, so a field written by a run is converted back to the
+    /// value it was written from one way rather than two.  A configuration table is small enough to be held whole,
+    /// unlike a sweep's results.
+    /// </remarks>
+    private static ConfigurationTable ReadConfigurationTable(string name, string path)
+    {
+        using var reader = new SimulationResultReader(path);
+
+        var rows = new List<object?[]>();
+
+        while (reader.ReadBlock(ConfigurationBlockRows) is object?[,] block)
+        {
+            int columnCount = block.GetLength(1);
+
+            for (int row = 0; row < block.GetLength(0); row++)
+            {
+                var values = new object?[columnCount];
+                for (int column = 0; column < columnCount; column++)
+                {
+                    values[column] = block[row, column];
+                }
+
+                rows.Add(values);
+            }
+        }
+
+        return new ConfigurationTable(name, [.. reader.Header], rows);
+    }
+
+    /// <summary>
     /// Computes the identifier of a sweep.
     /// </summary>
     /// <param name="jobs">The jobs of the sweep.</param>
     /// <param name="runConfiguration">The lines of the configuration the sweep was driven from.</param>
+    /// <param name="configurationTables">The structured tables of that configuration.</param>
     /// <returns>Eight hexadecimal characters.</returns>
     /// <remarks>
     /// The configuration is what the identifier is mostly for: it is the plan the sweep exercised, and it is what a
-    /// reader comparing two coalesced workbooks is comparing.  The run directory names are folded in as well, because
-    /// the configuration alone would give the same identifier to two sweeps of one unchanged plan, and the second
-    /// would then be written over the first.  The names carry each job's timestamp, so they distinguish those sweeps
-    /// while still being the same for every coalesce of one sweep: coalescing the same directories twice produces the
-    /// same identifier, and therefore the same workbook name, rather than accumulating copies.
+    /// reader comparing two coalesced workbooks is comparing.  Both halves of it are folded in, because the synopsis
+    /// is a summary and two plans that differ only in a row of a table it does not spell out are still two plans.  The
+    /// run directory names are folded in as well, because the configuration alone would give the same identifier to
+    /// two sweeps of one unchanged plan, and the second would then be written over the first.  The names carry each
+    /// job's timestamp, so they distinguish those sweeps while still being the same for every coalesce of one sweep:
+    /// coalescing the same directories twice produces the same identifier, and therefore the same workbook name,
+    /// rather than accumulating copies.
     /// </remarks>
-    private static string ComputeRunId(IReadOnlyList<SweepJob> jobs, string[] runConfiguration)
+    private static string ComputeRunId(IReadOnlyList<SweepJob> jobs, string[] runConfiguration,
+        IReadOnlyList<ConfigurationTable> configurationTables)
     {
         var material = new StringBuilder();
 
         foreach (string line in runConfiguration)
         {
             material.Append(line).Append('\n');
+        }
+
+        foreach (ConfigurationTable table in configurationTables)
+        {
+            foreach (string line in table.Describe())
+            {
+                material.Append(line).Append('\n');
+            }
         }
 
         foreach (SweepJob job in jobs.OrderBy(job => job.Name, StringComparer.Ordinal))
