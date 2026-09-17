@@ -271,31 +271,126 @@ public static class ExcelUtils
     }
 
     /// <summary>
-    /// Formats a column of a worksheet as text, so that Excel stores what is written into it verbatim.
+    /// Formats a block of a worksheet as text, so that Excel stores what is written into it verbatim.
     /// </summary>
-    /// <param name="worksheet">The worksheet whose column is being formatted.</param>
-    /// <param name="column">The one based column to format.</param>
+    /// <param name="worksheet">The worksheet whose cells are being formatted.</param>
+    /// <param name="firstRow">The one based row the block starts at.</param>
+    /// <param name="firstColumn">The one based column the block starts at.</param>
+    /// <param name="rowCount">The number of rows the block covers.</param>
+    /// <param name="columnCount">The number of columns the block covers.</param>
     /// <remarks>
     /// A line of prose that happens to begin with an equals sign, or that reads like a date, would otherwise be taken
     /// as a formula or converted as it was written.  The synopsis is a report to be read back exactly as the workbook
-    /// wrote it, so the column it lands in says so before anything is written to it.
+    /// wrote it, so the cells it lands in say so before anything is written to them.  It is the block rather than the
+    /// whole column, because a sheet that carries the synopsis also carries data below it, and a number written into
+    /// a text formatted cell is stored as text.
     /// </remarks>
-    public static void FormatColumnAsText(Excel.Worksheet worksheet, int column)
+    public static void FormatRangeAsText(Excel.Worksheet worksheet, int firstRow, int firstColumn, int rowCount,
+        int columnCount)
     {
         ArgumentNullException.ThrowIfNull(worksheet);
 
-        Excel.Range? columns = null;
-        Excel.Range? target = null;
+        if (rowCount <= 0 || columnCount <= 0)
+        {
+            return;
+        }
+
+        Excel.Range? first = null;
+        Excel.Range? last = null;
+        Excel.Range? block = null;
         try
         {
-            columns = worksheet.Columns;
-            target = (Excel.Range)columns[column];
-            target.NumberFormat = "@";
+            first = (Excel.Range)worksheet.Cells[firstRow, firstColumn];
+            last = (Excel.Range)worksheet.Cells[firstRow + rowCount - 1, firstColumn + columnCount - 1];
+            block = worksheet.Range[first, last];
+            block.NumberFormat = "@";
         }
         finally
         {
-            ReleaseComObject(target);
-            ReleaseComObject(columns);
+            ReleaseComObject(block);
+            ReleaseComObject(last);
+            ReleaseComObject(first);
+        }
+    }
+
+    /// <summary>
+    /// Emboldens one cell of a worksheet.
+    /// </summary>
+    /// <param name="worksheet">The worksheet whose cell is being formatted.</param>
+    /// <param name="row">The one based row of the cell.</param>
+    /// <param name="column">The one based column of the cell.</param>
+    /// <remarks>
+    /// This exists for the labels that name the configuration tables stacked down a sheet.  A table styles its own
+    /// header, and the label above it is the only part of the block that would otherwise read as loose text.
+    /// </remarks>
+    public static void SetCellBold(Excel.Worksheet worksheet, int row, int column)
+    {
+        ArgumentNullException.ThrowIfNull(worksheet);
+
+        Excel.Range? cell = null;
+        Excel.Font? font = null;
+        try
+        {
+            cell = (Excel.Range)worksheet.Cells[row, column];
+            font = cell.Font;
+            font.Bold = true;
+        }
+        finally
+        {
+            ReleaseComObject(font);
+            ReleaseComObject(cell);
+        }
+    }
+
+    /// <summary>
+    /// Defines a table (ListObject) over a block of a worksheet whose first row is the column headings.
+    /// </summary>
+    /// <param name="worksheet">The worksheet the block sits on.</param>
+    /// <param name="tableName">The name to give the table.</param>
+    /// <param name="firstRow">The one based row of the heading row.</param>
+    /// <param name="firstColumn">The one based column the block starts at.</param>
+    /// <param name="rowCount">The number of rows the block covers, the heading row included.</param>
+    /// <param name="columnCount">The number of columns the block covers.</param>
+    /// <remarks>
+    /// Excel holds no table of a heading row alone, so a caller with nothing to show must still leave the blank row
+    /// beneath the headings to the table.
+    /// </remarks>
+    public static void AddTable(Excel.Worksheet worksheet, string tableName, int firstRow, int firstColumn,
+        int rowCount, int columnCount)
+    {
+        ArgumentNullException.ThrowIfNull(worksheet);
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentOutOfRangeException.ThrowIfLessThan(rowCount, 2);
+        ArgumentOutOfRangeException.ThrowIfLessThan(columnCount, 1);
+
+        Excel.Range? first = null;
+        Excel.Range? last = null;
+        Excel.Range? block = null;
+        Excel.ListObjects? tables = null;
+        Excel.ListObject? added = null;
+        try
+        {
+            first = (Excel.Range)worksheet.Cells[firstRow, firstColumn];
+            last = (Excel.Range)worksheet.Cells[firstRow + rowCount - 1, firstColumn + columnCount - 1];
+            block = worksheet.Range[first, last];
+            tables = worksheet.ListObjects;
+
+            added = tables.Add(Excel.XlListObjectSourceType.xlSrcRange, block, Type.Missing,
+                Excel.XlYesNoGuess.xlYes);
+            added.Name = tableName;
+        }
+        catch (COMException ex)
+        {
+            throw new InvalidOperationException("Table " + tableName + " could not be defined on worksheet "
+                + worksheet.Name + ".", ex);
+        }
+        finally
+        {
+            ReleaseComObject(added);
+            ReleaseComObject(tables);
+            ReleaseComObject(block);
+            ReleaseComObject(last);
+            ReleaseComObject(first);
         }
     }
 
@@ -460,6 +555,45 @@ public static class ExcelUtils
     }
 
     /// <summary>
+    /// Reads the header text of a table's columns, in column order.
+    /// </summary>
+    /// <param name="table">The table to describe.</param>
+    /// <returns>The column headings, in the order they appear in the table.</returns>
+    /// <remarks>
+    /// <see cref="GetColumnIndexes"/> answers where a named column is; this answers what the columns are, which is
+    /// what copying a whole table out of the workbook needs.  The order is the table's own, so the headings line up
+    /// with the grid that <see cref="ReadTableRows"/> returns.
+    /// </remarks>
+    public static string[] GetColumnNames(Excel.ListObject table)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+
+        Excel.ListColumns columns = table.ListColumns;
+        try
+        {
+            var names = new string[columns.Count];
+
+            foreach (Excel.ListColumn column in columns)
+            {
+                try
+                {
+                    names[column.Index - 1] = column.Name;
+                }
+                finally
+                {
+                    ReleaseComObject(column);
+                }
+            }
+
+            return names;
+        }
+        finally
+        {
+            ReleaseComObject(columns);
+        }
+    }
+
+    /// <summary>
     /// Counts the columns of a table.
     /// </summary>
     /// <param name="table">The table to measure.</param>
@@ -535,8 +669,48 @@ public static class ExcelUtils
     {
         ArgumentNullException.ThrowIfNull(table);
 
-        Excel.Range range = table.DataBodyRange
+        return ReadDataBody(table)
             ?? throw new InvalidOperationException("Table " + table.Name + " has no data rows.");
+    }
+
+    /// <summary>
+    /// Reads every data row of every column of a table that may hold none.
+    /// </summary>
+    /// <param name="table">The table to read.</param>
+    /// <returns>
+    /// The values as a zero based grid indexed by row and then by column, with no rows when the table is empty.
+    /// Empty cells are null.
+    /// </returns>
+    /// <remarks>
+    /// The counterpart of <see cref="ReadTable"/>, for the tables a configuration is copied from: a plan that directs
+    /// no draws is a plan, not a broken workbook, so an empty table is read as the empty table it is rather than
+    /// reported.
+    /// </remarks>
+    [SuppressMessage("Performance", "CA1814:Prefer jagged arrays over multidimensional",
+        Justification = "Excel marshals a multi cell range as a rectangular variant array.")]
+    public static object?[,] ReadTableRows(Excel.ListObject table)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+
+        return ReadDataBody(table) ?? new object?[0, GetColumnCount(table)];
+    }
+
+    /// <summary>
+    /// Reads the data body of a table in a single call.
+    /// </summary>
+    /// <param name="table">The table to read.</param>
+    /// <returns>The values as a zero based grid, or null when the table has no data rows.</returns>
+    [SuppressMessage("Performance", "CA1814:Prefer jagged arrays over multidimensional",
+        Justification = "Excel marshals a multi cell range as a rectangular variant array.")]
+    private static object?[,]? ReadDataBody(Excel.ListObject table)
+    {
+        Excel.Range? range = table.DataBodyRange;
+
+        if (range is null)
+        {
+            return null;
+        }
+
         try
         {
             object? value = range.Value2;

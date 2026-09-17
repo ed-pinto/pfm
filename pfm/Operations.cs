@@ -494,15 +494,19 @@ public static class Operations
     }
 
     /// <summary>
-    /// Renames the workbook's first worksheet and writes the configuration the sweep was driven from into it, one line
-    /// of the file per row.
+    /// Renames the workbook's first worksheet and writes the configuration the sweep was driven from into it: the
+    /// synopsis one line per row, then the structured tables stacked one after another beneath it.
     /// </summary>
     /// <param name="session">The session that owns the workbook.</param>
     /// <param name="sweep">The sweep being coalesced.</param>
     /// <param name="timer">The timer that measures the phases of the operation.</param>
     /// <param name="output">The writer for normal output.</param>
-    [SuppressMessage("Performance", "CA1814:Prefer jagged arrays over multidimensional",
-        Justification = "Excel marshals a multi cell range as a rectangular variant array.")]
+    /// <remarks>
+    /// One sheet holds both because they are one thing: the synopsis says in prose what the tables beneath it state
+    /// row by row, and a reader who wants to know what a sweep was run against should not have to look in two places.
+    /// Stacking the tables down one column, rather than spreading them across the sheet, is what lets a table grow a
+    /// row between two sweeps without moving anything sideways.
+    /// </remarks>
     private static void WriteRunConfigurationWorksheet(ExcelSession session, CoalescedSweep sweep,
         DiagnosticTimer timer, TextWriter output)
     {
@@ -513,19 +517,11 @@ public static class Operations
         {
             worksheet.Name = RunConfigurationWorksheet;
 
-            // The synopsis is a report rather than data: the column is formatted as text before anything is written,
-            // so a line reading like a date or beginning with an equals sign is stored as the workbook wrote it.
-            ExcelUtils.FormatColumnAsText(worksheet, 1);
+            int nextRow = WriteSynopsis(worksheet, sweep.RunConfiguration);
 
-            if (sweep.RunConfiguration.Count > 0)
+            foreach (ConfigurationTable table in sweep.ConfigurationTables)
             {
-                var lines = new object?[sweep.RunConfiguration.Count, 1];
-                for (int row = 0; row < sweep.RunConfiguration.Count; row++)
-                {
-                    lines[row, 0] = sweep.RunConfiguration[row];
-                }
-
-                ExcelUtils.WriteGrid(worksheet, 1, 1, lines);
+                nextRow = WriteConfigurationTable(worksheet, table, nextRow);
             }
         }
         finally
@@ -533,8 +529,91 @@ public static class Operations
             ExcelUtils.ReleaseComObject(worksheet);
         }
 
-        output.WriteLine("Wrote " + Format(sweep.RunConfiguration.Count) + " lines of run configuration to "
-            + RunConfigurationWorksheet + ".");
+        output.WriteLine("Wrote " + Format(sweep.RunConfiguration.Count) + " lines of run configuration and "
+            + Format(sweep.ConfigurationTables.Count) + " configuration tables to " + RunConfigurationWorksheet + ".");
+    }
+
+    /// <summary>
+    /// Writes the synopsis into the top of the run configuration worksheet.
+    /// </summary>
+    /// <param name="worksheet">The worksheet being written.</param>
+    /// <param name="lines">The lines of the synopsis.</param>
+    /// <returns>The one based row the next block starts at, one blank row below the synopsis.</returns>
+    [SuppressMessage("Performance", "CA1814:Prefer jagged arrays over multidimensional",
+        Justification = "Excel marshals a multi cell range as a rectangular variant array.")]
+    private static int WriteSynopsis(Excel.Worksheet worksheet, IReadOnlyList<string> lines)
+    {
+        if (lines.Count == 0)
+        {
+            return 1;
+        }
+
+        // The synopsis is a report rather than data: its cells are formatted as text before anything is written, so a
+        // line reading like a date or beginning with an equals sign is stored as the workbook wrote it.  Only those
+        // cells, because the tables below hold numbers, and a number written into a text formatted cell is text.
+        ExcelUtils.FormatRangeAsText(worksheet, 1, 1, lines.Count, 1);
+
+        var block = new object?[lines.Count, 1];
+        for (int row = 0; row < lines.Count; row++)
+        {
+            block[row, 0] = lines[row];
+        }
+
+        ExcelUtils.WriteGrid(worksheet, 1, 1, block);
+
+        return lines.Count + 2;
+    }
+
+    /// <summary>
+    /// Writes one configuration table into the run configuration worksheet: a label naming it, then its headings and
+    /// rows as an Excel table.
+    /// </summary>
+    /// <param name="worksheet">The worksheet being written.</param>
+    /// <param name="table">The table to write.</param>
+    /// <param name="firstRow">The one based row the label goes on.</param>
+    /// <returns>The one based row the next block starts at, one blank row below this one.</returns>
+    /// <remarks>
+    /// The block is defined as an Excel table rather than left as a grid, so that it can be filtered and referred to
+    /// by name in the analysis the coalesced workbook exists for.  A table the plan left empty is written as its
+    /// headings and one blank row, which is the smallest table Excel holds.
+    /// </remarks>
+    [SuppressMessage("Performance", "CA1814:Prefer jagged arrays over multidimensional",
+        Justification = "Excel marshals a multi cell range as a rectangular variant array.")]
+    private static int WriteConfigurationTable(Excel.Worksheet worksheet, ConfigurationTable table, int firstRow)
+    {
+        var label = new object?[1, 1] { { table.Name } };
+        ExcelUtils.WriteGrid(worksheet, firstRow, 1, label);
+        ExcelUtils.SetCellBold(worksheet, firstRow, 1);
+
+        int headerRow = firstRow + 1;
+
+        var headings = new object?[1, table.Header.Count];
+        for (int column = 0; column < table.Header.Count; column++)
+        {
+            headings[0, column] = table.Header[column];
+        }
+
+        ExcelUtils.WriteGrid(worksheet, headerRow, 1, headings);
+
+        if (table.Rows.Count > 0)
+        {
+            var values = new object?[table.Rows.Count, table.Header.Count];
+            for (int row = 0; row < table.Rows.Count; row++)
+            {
+                object?[] source = table.Rows[row];
+                for (int column = 0; column < table.Header.Count && column < source.Length; column++)
+                {
+                    values[row, column] = source[column];
+                }
+            }
+
+            ExcelUtils.WriteGrid(worksheet, headerRow + 1, 1, values);
+        }
+
+        int bodyRows = Math.Max(table.Rows.Count, 1);
+        ExcelUtils.AddTable(worksheet, table.Name, headerRow, 1, bodyRows + 1, table.Header.Count);
+
+        return headerRow + bodyRows + 2;
     }
 
     /// <summary>
@@ -800,9 +879,10 @@ public static class Operations
     /// <param name="timer">The timer that measures the phases of the operation.</param>
     /// <param name="output">The writer for normal output.</param>
     /// <remarks>
-    /// The copy of the workbook is deleted when the job ends, so the synopsis is what a results file is read against
+    /// The copy of the workbook is deleted when the job ends, so this is what a results file is read against
     /// afterwards.  Writing it before the first simulation also means an interrupted sweep still says what it was
-    /// running.
+    /// running.  Both forms are recorded: the synopsis, which is prose for a reader, and the tables behind it, which
+    /// are the plan itself as values.
     /// </remarks>
     private static void WriteRunConfiguration(ExcelSession session, SimulationRun run, DiagnosticTimer timer,
         TextWriter output)
@@ -810,7 +890,10 @@ public static class Operations
         using IDisposable scope = timer.Measure("write run configuration");
 
         string path = RunConfiguration.Write(session.Workbook, run.Directory);
-        output.WriteLine("The configuration of the workbook this job runs is recorded in " + path + ".");
+        IReadOnlyList<string> tables = RunConfiguration.WriteTables(session.Workbook, run.Directory);
+
+        output.WriteLine("The configuration of the workbook this job runs is recorded in " + path + ", beside "
+            + Format(tables.Count) + " tables of it written as CSV.");
     }
 
     /// <summary>

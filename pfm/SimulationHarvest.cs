@@ -71,10 +71,12 @@ public sealed class SummaryHarvester : IDisposable
     /// </remarks>
     public static readonly IReadOnlyList<string> DataElements =
     [
+        "HistoricalYear",
         "NetIncome",
         "NetIncomeCurrentDollars",
         "EndingPortfolioValue",
         "EndingPortfolioValueCurrentDollars",
+        "IncomeShortfall",
         "TotalTax",
         "TotalTaxCurrentDollars",
         "PortfolioConsumedRatio",
@@ -82,7 +84,8 @@ public sealed class SummaryHarvester : IDisposable
         "RatioBondLadder",
         "RatioEquityConcentrated",
         "RatioEquityCore",
-        "RatioEquityInternational"
+        "RatioEquityInternational",
+        "MinSemesterIncomeThrottle"        
     ];
 
     private readonly int[] _elementColumns;
