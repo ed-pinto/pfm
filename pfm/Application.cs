@@ -54,6 +54,7 @@ public static class Application
             Commands.MonteCarlo => Operations.MonteCarlo(arguments, output, error),
             Commands.BackTest => Operations.BackTest(arguments, output, error),
             Commands.Coalesce => Operations.Coalesce(arguments, output, error),
+            Commands.ApplyAnalysis => Operations.ApplyAnalysis(arguments, output, error),
             _ => NotImplemented(arguments.Command, error)
         };
     }

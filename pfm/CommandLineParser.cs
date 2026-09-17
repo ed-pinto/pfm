@@ -17,6 +17,7 @@ public class CommandLineParser
     private const string MonteCarloCommand = "monte-carlo";
     private const string BackTestCommand = "back-test";
     private const string CoalesceCommand = "coalesce";
+    private const string ApplyAnalysisCommand = "apply-analysis";
 
     /// <summary>
     /// The input path a coalesce uses when the caller does not give one: the current directory, which is where a
@@ -35,6 +36,7 @@ public class CommandLineParser
     private string? _helpMessage;
     private Commands _command;
     private string? _filePath;
+    private string? _templatePath;
     private bool _timing;
     private int _jobCount = 1;
     private int _jobIndex;
@@ -117,9 +119,10 @@ public class CommandLineParser
         var iterateCommand = new Command(IterateCommand, "Iterates calculations in the PortfolioManager workbook which "
             + "require iterative updates.");
 
-        // The workbook option belongs to the commands that drive a workbook rather than to the root, because coalesce
-        // has no workbook to be pointed at: it reads what a finished sweep left on disk.  It is still declared once
-        // and added to each of those commands, so they describe it identically and read it from one place.
+        // The workbook option belongs to the commands that are pointed at one rather than to the root, because coalesce
+        // is pointed at no workbook: it reads what a finished sweep left on disk.  This one is the model, declared once
+        // and added to each command that drives it so that they describe it identically; apply-analysis is pointed at
+        // one sweep's workbook instead, and declares the option in those words below.
         Option<string> filePathOption = new("--file-path")
         {
             Description = "Specifies the path to the PortfolioManager workbook.",
@@ -186,8 +189,7 @@ public class CommandLineParser
 
         Option<string> outputPathOption = new("--output-path")
         {
-            Description = "The directory the coalesced workbook is written to.  Defaults to " + DefaultOutputPath
-                + ".",
+            Description = "The directory the workbook is written to.  Defaults to " + DefaultOutputPath + ".",
             Required = false,
             Aliases = { "-o" },
             DefaultValueFactory = _ => DefaultOutputPath
@@ -195,6 +197,31 @@ public class CommandLineParser
 
         coalesceCommand.Options.Add(inputPathOption);
         coalesceCommand.Options.Add(outputPathOption);
+
+        var applyAnalysisCommand = new Command(ApplyAnalysisCommand, "Applies the analysis of a template workbook to "
+            + "one coalesced sweep.");
+
+        // The template is a workbook of its own rather than the one --file-path points at, because the two are
+        // different things: the sweep is the data and the template is the analysis of it.  Neither is written to.
+        Option<string> templateOption = new("--template")
+        {
+            Description = "Specifies the path to the analysis template workbook, ex. PortfolioSimAnalysis.xlsx.",
+            Required = true
+        };
+
+        // The workbook this command is pointed at is one sweep's data rather than the model, so it describes the
+        // option itself rather than sharing the one the commands that drive the model declare.
+        Option<string> sweepPathOption = new("--file-path")
+        {
+            Description = "Specifies the path to the workbook of one coalesced sweep, ex. "
+                + "PortfolioSimData.48a0f144.xlsx.",
+            Required = true,
+            Aliases = { "-f" }
+        };
+
+        applyAnalysisCommand.Options.Add(sweepPathOption);
+        applyAnalysisCommand.Options.Add(templateOption);
+        applyAnalysisCommand.Options.Add(outputPathOption);
 
         iterateCommand.Options.Add(filePathOption);
         backTestCommand.Options.Add(filePathOption);
@@ -205,6 +232,7 @@ public class CommandLineParser
         rootCommand.Subcommands.Add(backTestCommand);
         rootCommand.Subcommands.Add(monteCarloCommand);
         rootCommand.Subcommands.Add(coalesceCommand);
+        rootCommand.Subcommands.Add(applyAnalysisCommand);
 
         rootCommand.Options.Remove(rootCommand.Options.OfType<VersionOption>().Single());
         HelpOption helpOption = rootCommand.Options.OfType<HelpOption>().Single();
@@ -253,14 +281,22 @@ public class CommandLineParser
                     _inputPath = parseResult.GetValue(inputPathOption) ?? DefaultInputPath;
                     _outputPath = parseResult.GetValue(outputPathOption) ?? DefaultOutputPath;
                     break;
+                case ApplyAnalysisCommand:
+                    _command = Commands.ApplyAnalysis;
+
+                    _filePath = parseResult.GetValue(sweepPathOption);
+                    _templatePath = parseResult.GetValue(templateOption);
+                    _outputPath = parseResult.GetValue(outputPathOption) ?? DefaultOutputPath;
+                    break;
                 default:
                     SetError("Unknown command: " + parseResult.CommandResult.Command.Name);
                     break;
             }
 
             // The workbook option is declared by the commands that drive one, so this yields null for a command that
-            // does not, which is what PrepareArguments then declines to validate as a path.
-            _filePath = parseResult.GetValue(filePathOption);
+            // does not, which is what PrepareArguments then declines to validate as a path.  A command that declares a
+            // workbook option of its own has read it above, and keeps it.
+            _filePath ??= parseResult.GetValue(filePathOption);
             _timing = parseResult.GetValue(timingOption);
         }
     }
@@ -282,9 +318,17 @@ public class CommandLineParser
             return;
         }
 
-        if (_command == Commands.Coalesce && !Utils.IsValidNewDirectoryPath(_outputPath))
+        if ((_command == Commands.Coalesce || _command == Commands.ApplyAnalysis)
+            && !Utils.IsValidNewDirectoryPath(_outputPath))
         {
             SetError("Invalid output path: " + _outputPath + ". It must be a path a directory can be created at.");
+            return;
+        }
+
+        if (_command == Commands.ApplyAnalysis && !Utils.IsValidExcelPath(_templatePath))
+        {
+            SetError("Invalid template path: " + _templatePath + ". The analysis template must be a valid Excel "
+                + "(.xlsx) file.");
             return;
         }
 
@@ -312,6 +356,7 @@ public class CommandLineParser
         {
             Command = _command,
             FilePath = _filePath,
+            TemplatePath = _templatePath,
             Timing = _timing,
             JobCount = _jobCount,
             JobIndex = _jobIndex,

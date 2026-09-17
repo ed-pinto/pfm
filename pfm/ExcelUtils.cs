@@ -971,6 +971,824 @@ public static class ExcelUtils
     }
 
     /// <summary>
+    /// Gets the named worksheet from the workbook, or null when the workbook holds no worksheet of that name.
+    /// </summary>
+    /// <param name="workbook">The workbook to search.</param>
+    /// <param name="worksheetName">The name of the worksheet.</param>
+    /// <returns>The worksheet, or null when it is not there.</returns>
+    /// <remarks>
+    /// The counterpart of <see cref="GetWorksheet(Excel.Workbook, string)"/>, for a caller that is asking whether a
+    /// sheet is present rather than requiring it, ex. one looking for the worksheet a sweep named its results after.
+    /// </remarks>
+    public static Excel.Worksheet? FindWorksheet(Excel.Workbook workbook, string worksheetName)
+    {
+        ArgumentNullException.ThrowIfNull(workbook);
+
+        Excel.Sheets worksheets = workbook.Worksheets;
+        try
+        {
+            return (Excel.Worksheet)worksheets[worksheetName];
+        }
+        catch (COMException)
+        {
+            return null;
+        }
+        finally
+        {
+            ReleaseComObject(worksheets);
+        }
+    }
+
+    /// <summary>
+    /// Resizes a table to cover a block of its worksheet, leaving the table itself and every reference to it alone.
+    /// </summary>
+    /// <param name="table">The table to resize.</param>
+    /// <param name="firstRow">The one based row of the heading row, which a resize cannot move.</param>
+    /// <param name="firstColumn">The one based column the block starts at.</param>
+    /// <param name="rowCount">The number of rows the block covers, the heading row included.</param>
+    /// <param name="columnCount">The number of columns the block covers.</param>
+    /// <remarks>
+    /// This is how a table comes to cover a different sweep's rows, and the only way that leaves the analysis reading
+    /// it.  A table that is dissolved takes its references with it: Excel rewrites every formula that read it
+    /// structurally into the cell range the table happened to occupy, ex. ROWS(SimData) becomes
+    /// ROWS(SimData!$A$2:$B$6), so the next sweep would be read through the last one's geometry with nothing reported.
+    /// Deleting the table instead leaves those formulas as #REF!, and defining a second table of the same name is not
+    /// possible at all: table names are workbook scoped, so Excel names it SimData1 and the references go on reading
+    /// the original.  Resizing is therefore not one way of several; it is the only one.
+    /// </remarks>
+    public static void ResizeTable(Excel.ListObject table, int firstRow, int firstColumn, int rowCount,
+        int columnCount)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+        ArgumentOutOfRangeException.ThrowIfLessThan(rowCount, 2);
+        ArgumentOutOfRangeException.ThrowIfLessThan(columnCount, 1);
+
+        Excel.Worksheet? worksheet = null;
+        Excel.Range? first = null;
+        Excel.Range? last = null;
+        Excel.Range? block = null;
+        try
+        {
+            worksheet = (Excel.Worksheet)table.Parent;
+            first = (Excel.Range)worksheet.Cells[firstRow, firstColumn];
+            last = (Excel.Range)worksheet.Cells[firstRow + rowCount - 1, firstColumn + columnCount - 1];
+            block = worksheet.Range[first, last];
+
+            table.Resize(block);
+        }
+        catch (COMException ex)
+        {
+            throw new InvalidOperationException("Table " + table.Name + " could not be resized to cover "
+                + Format(rowCount) + " rows and " + Format(columnCount) + " columns from row " + Format(firstRow)
+                + ".", ex);
+        }
+        finally
+        {
+            ReleaseComObject(block);
+            ReleaseComObject(last);
+            ReleaseComObject(first);
+            ReleaseComObject(worksheet);
+        }
+    }
+
+    /// <summary>
+    /// Gets the block of the worksheet a table covers, its heading row included.
+    /// </summary>
+    /// <param name="table">The table to measure.</param>
+    /// <returns>The corners of the block, as rows and columns.</returns>
+    public static (int FirstRow, int FirstColumn, int RowCount, int ColumnCount) GetTableExtent(Excel.ListObject table)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+
+        Excel.Range? range = null;
+        Excel.Range? rows = null;
+        Excel.Range? columns = null;
+        try
+        {
+            range = table.Range;
+            rows = range.Rows;
+            columns = range.Columns;
+
+            return (range.Row, range.Column, rows.Count, columns.Count);
+        }
+        finally
+        {
+            ReleaseComObject(columns);
+            ReleaseComObject(rows);
+            ReleaseComObject(range);
+        }
+    }
+
+    /// <summary>
+    /// Gets the named table of a worksheet.
+    /// </summary>
+    /// <param name="worksheet">The worksheet that hosts the table.</param>
+    /// <param name="tableName">The name of the table.</param>
+    /// <returns>The table.</returns>
+    public static Excel.ListObject GetTable(Excel.Worksheet worksheet, string tableName)
+    {
+        ArgumentNullException.ThrowIfNull(worksheet);
+
+        Excel.ListObjects? tables = null;
+        try
+        {
+            tables = worksheet.ListObjects;
+            return tables[tableName];
+        }
+        catch (COMException ex)
+        {
+            throw new InvalidOperationException("Table " + tableName + " was not found on worksheet "
+                + worksheet.Name + ".", ex);
+        }
+        finally
+        {
+            ReleaseComObject(tables);
+        }
+    }
+
+    /// <summary>
+    /// Inserts blank worksheet rows, moving everything below them down.
+    /// </summary>
+    /// <param name="worksheet">The worksheet to insert into.</param>
+    /// <param name="firstRow">The one based row the blank rows are inserted at.</param>
+    /// <param name="rowCount">The number of rows to insert.</param>
+    /// <remarks>
+    /// Whole rows rather than cells, because that is what moves a table below the insertion without splitting it, and
+    /// what makes a table grow when the insertion lands inside its body: Excel maintains the ranges of the tables it
+    /// moves, so the references to them survive.  Adding rows through a table itself is refused on a sheet that stacks
+    /// tables, since that would shift part of a row and not the rest of it.
+    /// </remarks>
+    public static void InsertRows(Excel.Worksheet worksheet, int firstRow, int rowCount)
+    {
+        ArgumentNullException.ThrowIfNull(worksheet);
+
+        if (rowCount <= 0)
+        {
+            return;
+        }
+
+        Excel.Range? rows = null;
+        try
+        {
+            rows = (Excel.Range)worksheet.Rows[Format(firstRow) + ":" + Format(firstRow + rowCount - 1)];
+            rows.Insert(Excel.XlInsertShiftDirection.xlShiftDown);
+        }
+        finally
+        {
+            ReleaseComObject(rows);
+        }
+    }
+
+    /// <summary>
+    /// Deletes worksheet rows, moving everything below them up.
+    /// </summary>
+    /// <param name="worksheet">The worksheet to delete from.</param>
+    /// <param name="firstRow">The one based first row to delete.</param>
+    /// <param name="rowCount">The number of rows to delete.</param>
+    public static void DeleteRows(Excel.Worksheet worksheet, int firstRow, int rowCount)
+    {
+        ArgumentNullException.ThrowIfNull(worksheet);
+
+        if (rowCount <= 0)
+        {
+            return;
+        }
+
+        Excel.Range? rows = null;
+        try
+        {
+            rows = (Excel.Range)worksheet.Rows[Format(firstRow) + ":" + Format(firstRow + rowCount - 1)];
+            rows.Delete(Excel.XlDeleteShiftDirection.xlShiftUp);
+        }
+        finally
+        {
+            ReleaseComObject(rows);
+        }
+    }
+
+    /// <summary>
+    /// Clears the contents of a band of worksheet rows, leaving their formatting alone.
+    /// </summary>
+    /// <param name="worksheet">The worksheet to clear.</param>
+    /// <param name="firstRow">The one based first row to clear.</param>
+    /// <param name="rowCount">The number of rows to clear.</param>
+    public static void ClearRowContents(Excel.Worksheet worksheet, int firstRow, int rowCount)
+    {
+        ArgumentNullException.ThrowIfNull(worksheet);
+
+        if (rowCount <= 0)
+        {
+            return;
+        }
+
+        Excel.Range? rows = null;
+        try
+        {
+            rows = (Excel.Range)worksheet.Rows[Format(firstRow) + ":" + Format(firstRow + rowCount - 1)];
+            rows.ClearContents();
+        }
+        finally
+        {
+            ReleaseComObject(rows);
+        }
+    }
+
+    /// <summary>
+    /// Clears whatever a worksheet holds outside a block anchored at its first cell.
+    /// </summary>
+    /// <param name="worksheet">The worksheet to clear.</param>
+    /// <param name="lastRow">The last row of the block to keep.</param>
+    /// <param name="lastColumn">The last column of the block to keep.</param>
+    /// <remarks>
+    /// A sheet written twice holds whatever the wider or longer of the two writes left behind.  The rows below and the
+    /// columns beyond the block just written are therefore cleared rather than assumed empty: a stale row beneath a
+    /// table reads as data to anything that measures the sheet rather than the table.
+    /// </remarks>
+    public static void ClearBeyond(Excel.Worksheet worksheet, int lastRow, int lastColumn)
+    {
+        ArgumentNullException.ThrowIfNull(worksheet);
+
+        Excel.Range? used = null;
+        try
+        {
+            used = worksheet.UsedRange;
+
+            int usedLastRow;
+            int usedLastColumn;
+            Excel.Range? rows = null;
+            Excel.Range? columns = null;
+            try
+            {
+                rows = used.Rows;
+                columns = used.Columns;
+                usedLastRow = used.Row + rows.Count - 1;
+                usedLastColumn = used.Column + columns.Count - 1;
+            }
+            finally
+            {
+                ReleaseComObject(columns);
+                ReleaseComObject(rows);
+            }
+
+            if (usedLastRow > lastRow)
+            {
+                ClearRange(worksheet, lastRow + 1, 1, usedLastRow, usedLastColumn);
+            }
+
+            if (usedLastColumn > lastColumn)
+            {
+                ClearRange(worksheet, 1, lastColumn + 1, Math.Min(usedLastRow, lastRow), usedLastColumn);
+            }
+        }
+        finally
+        {
+            ReleaseComObject(used);
+        }
+    }
+
+    /// <summary>
+    /// Clears the contents of a block of a worksheet.
+    /// </summary>
+    /// <param name="worksheet">The worksheet to clear.</param>
+    /// <param name="firstRow">The one based first row of the block.</param>
+    /// <param name="firstColumn">The one based first column of the block.</param>
+    /// <param name="lastRow">The one based last row of the block.</param>
+    /// <param name="lastColumn">The one based last column of the block.</param>
+    private static void ClearRange(Excel.Worksheet worksheet, int firstRow, int firstColumn, int lastRow,
+        int lastColumn)
+    {
+        if (lastRow < firstRow || lastColumn < firstColumn)
+        {
+            return;
+        }
+
+        Excel.Range? first = null;
+        Excel.Range? last = null;
+        Excel.Range? block = null;
+        try
+        {
+            first = (Excel.Range)worksheet.Cells[firstRow, firstColumn];
+            last = (Excel.Range)worksheet.Cells[lastRow, lastColumn];
+            block = worksheet.Range[first, last];
+            block.ClearContents();
+        }
+        finally
+        {
+            ReleaseComObject(block);
+            ReleaseComObject(last);
+            ReleaseComObject(first);
+        }
+    }
+
+    /// <summary>
+    /// Gets the block of cells a worksheet uses.
+    /// </summary>
+    /// <param name="worksheet">The worksheet to measure.</param>
+    /// <returns>The corners of the block, as rows and columns.</returns>
+    public static (int FirstRow, int FirstColumn, int LastRow, int LastColumn) GetUsedExtent(
+        Excel.Worksheet worksheet)
+    {
+        ArgumentNullException.ThrowIfNull(worksheet);
+
+        Excel.Range? used = null;
+        Excel.Range? rows = null;
+        Excel.Range? columns = null;
+        try
+        {
+            used = worksheet.UsedRange;
+            rows = used.Rows;
+            columns = used.Columns;
+
+            return (used.Row, used.Column, used.Row + rows.Count - 1, used.Column + columns.Count - 1);
+        }
+        finally
+        {
+            ReleaseComObject(columns);
+            ReleaseComObject(rows);
+            ReleaseComObject(used);
+        }
+    }
+
+    /// <summary>
+    /// Copies a block of cells from one worksheet onto the same block of another as values alone, a band of rows at a
+    /// time.
+    /// </summary>
+    /// <param name="source">The worksheet to copy from.</param>
+    /// <param name="destination">The worksheet to copy onto.</param>
+    /// <param name="lastRow">The last row of the block, which starts at the first cell of the worksheet.</param>
+    /// <param name="lastColumn">The last column of the block.</param>
+    /// <param name="blockRows">The number of rows read and written per pair of calls.</param>
+    /// <remarks>
+    /// Read and written as arrays rather than copied and pasted, because a paste carries structure as well as values: a
+    /// paste over the block a table covers removes that table, and every formula that read it structurally is rewritten
+    /// to #REF!.  Assigning values into the cells of a table is ordinary editing, with one exception that matters here:
+    /// a single assignment covering a table's whole block, heading row included, replaces the table the same way a paste
+    /// does.  The heading row is therefore written on its own, and the rows beneath it in bands, which also keeps what
+    /// one call marshals bounded however large the sweep is.
+    /// </remarks>
+    public static void CopyValues(Excel.Worksheet source, Excel.Worksheet destination, int lastRow, int lastColumn,
+        int blockRows)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(destination);
+        ArgumentOutOfRangeException.ThrowIfLessThan(blockRows, 1);
+
+        WriteGrid(destination, 1, 1, ReadGrid(source, 1, 1, 1, lastColumn));
+
+        for (int firstRow = 2; firstRow <= lastRow; firstRow += blockRows)
+        {
+            int rows = Math.Min(blockRows, lastRow - firstRow + 1);
+
+            WriteGrid(destination, firstRow, 1, ReadGrid(source, firstRow, 1, rows, lastColumn));
+        }
+    }
+
+    /// <summary>
+    /// Replaces every formula on a worksheet with the value it last calculated.
+    /// </summary>
+    /// <param name="worksheet">The worksheet to flatten.</param>
+    /// <remarks>
+    /// The paste is onto the range it was copied from, which is how a sheet is flattened without leaving the Excel
+    /// process.  Values alone, so the number formats, the conditional formatting and the charts are untouched, and an
+    /// error a cell deliberately holds, ex. the #N/A of a blank trial slot, is carried across as that error rather than
+    /// as a blank.  Assigning the values of the range to itself would not do: an error reads back as the number Excel
+    /// codes it with, and a cell that held #N/A would come to hold -2146826246.
+    /// <para>
+    /// A caller must have recalculated first, because what is kept is what the cells currently show, and must flatten
+    /// the sheets that read a spill before the sheet that spills: a name anchored to a spill refers to nothing once the
+    /// spill is a block of values, and every formula reading that name shows #REF! from then on.  A sheet that any table
+    /// is defined on is not flattened at all - it holds no formula to flatten, and the paste would remove the table.
+    /// </para>
+    /// </remarks>
+    public static void FlattenToValues(Excel.Worksheet worksheet)
+    {
+        ArgumentNullException.ThrowIfNull(worksheet);
+
+        Excel.Range? used = null;
+        Excel.Application? application = null;
+        try
+        {
+            used = worksheet.UsedRange;
+
+            used.Copy();
+            used.PasteSpecial(Excel.XlPasteType.xlPasteValues);
+
+            application = worksheet.Application;
+            application.CutCopyMode = 0;
+        }
+        finally
+        {
+            ReleaseComObject(application);
+            ReleaseComObject(used);
+        }
+    }
+
+    /// <summary>
+    /// Reads a block of a worksheet in a single call.
+    /// </summary>
+    /// <param name="worksheet">The worksheet to read from.</param>
+    /// <param name="firstRow">The one based row the block starts at.</param>
+    /// <param name="firstColumn">The one based column the block starts at.</param>
+    /// <param name="rowCount">The number of rows the block covers.</param>
+    /// <param name="columnCount">The number of columns the block covers.</param>
+    /// <returns>The values as a zero based grid indexed by row and then by column.  Empty cells are null.</returns>
+    /// <remarks>
+    /// The counterpart of <see cref="WriteGrid"/>, and one cross process call for the same reason.  A cell holding an
+    /// error is read as the integer code of that error, which is what <see cref="IsError"/> recognizes.
+    /// </remarks>
+    [SuppressMessage("Performance", "CA1814:Prefer jagged arrays over multidimensional",
+        Justification = "Excel marshals a multi cell range as a rectangular variant array.")]
+    public static object?[,] ReadGrid(Excel.Worksheet worksheet, int firstRow, int firstColumn, int rowCount,
+        int columnCount)
+    {
+        ArgumentNullException.ThrowIfNull(worksheet);
+
+        if (rowCount <= 0 || columnCount <= 0)
+        {
+            return new object?[0, 0];
+        }
+
+        Excel.Range? first = null;
+        Excel.Range? last = null;
+        Excel.Range? block = null;
+        try
+        {
+            first = (Excel.Range)worksheet.Cells[firstRow, firstColumn];
+            last = (Excel.Range)worksheet.Cells[firstRow + rowCount - 1, firstColumn + columnCount - 1];
+            block = worksheet.Range[first, last];
+
+            return ReadRange(block);
+        }
+        finally
+        {
+            ReleaseComObject(block);
+            ReleaseComObject(last);
+            ReleaseComObject(first);
+        }
+    }
+
+    /// <summary>
+    /// Reads every cell of a range in a single call.
+    /// </summary>
+    /// <param name="range">The range to read.</param>
+    /// <returns>The values as a zero based grid indexed by row and then by column.  Empty cells are null.</returns>
+    [SuppressMessage("Performance", "CA1814:Prefer jagged arrays over multidimensional",
+        Justification = "Excel marshals a multi cell range as a rectangular variant array.")]
+    public static object?[,] ReadRange(Excel.Range range)
+    {
+        ArgumentNullException.ThrowIfNull(range);
+
+        object? value = range.Value2;
+
+        if (value is not object[,] grid)
+        {
+            // A single cell range yields the scalar value rather than a two dimensional array.
+            return new object?[1, 1] { { value } };
+        }
+
+        int firstRow = grid.GetLowerBound(0);
+        int firstColumn = grid.GetLowerBound(1);
+        int rowCount = grid.GetLength(0);
+        int columnCount = grid.GetLength(1);
+
+        var values = new object?[rowCount, columnCount];
+        for (int row = 0; row < rowCount; row++)
+        {
+            for (int column = 0; column < columnCount; column++)
+            {
+                values[row, column] = grid[firstRow + row, firstColumn + column];
+            }
+        }
+
+        return values;
+    }
+
+    /// <summary>
+    /// The error codes Excel returns for the cell errors, keyed by the code and valued by what the cell displays.
+    /// </summary>
+    /// <remarks>
+    /// A cell holding an error marshals as the integer code of that error rather than as text, so a caller reading a
+    /// block of cells recognizes an error by the value it reads rather than by asking Excel a second time.
+    /// </remarks>
+    private static readonly Dictionary<int, string> CellErrors = new()
+    {
+        // The code of an error is 2000 + its position in Excel's own list, marshalled as -2146826288 + that offset,
+        // ex. #DIV/0! is 2007 and arrives as -2146826281.  The list skips 2044, so the errors after #GETTING_DATA are
+        // not where counting from the one before them would put them.
+        [-2146826288] = "#NULL!",
+        [-2146826281] = "#DIV/0!",
+        [-2146826273] = "#VALUE!",
+        [-2146826265] = "#REF!",
+        [-2146826259] = "#NAME?",
+        [-2146826252] = "#NUM!",
+        [-2146826246] = "#N/A",
+        [-2146826245] = "#GETTING_DATA",
+        [-2146826243] = "#SPILL!",
+        [-2146826242] = "#CONNECT!",
+        [-2146826241] = "#BLOCKED!",
+        [-2146826240] = "#UNKNOWN!",
+        [-2146826239] = "#FIELD!",
+        [-2146826238] = "#CALC!"
+    };
+
+    /// <summary>
+    /// The code of the error a cell shows as #N/A, which the analysis uses deliberately to keep a line off a chart.
+    /// </summary>
+    public const int NotAvailableError = -2146826246;
+
+    /// <summary>
+    /// Indicates whether a value read from a cell is an error, and says which error it is.
+    /// </summary>
+    /// <param name="value">The value read from the cell.</param>
+    /// <param name="error">The error the cell shows, ex. #N/A, or null when the value is not an error.</param>
+    /// <returns>True when the value is a cell error.</returns>
+    public static bool IsError(object? value, [NotNullWhen(true)] out string? error)
+    {
+        if (value is int code && CellErrors.TryGetValue(code, out string? text))
+        {
+            error = text;
+            return true;
+        }
+
+        error = null;
+        return false;
+    }
+
+    /// <summary>
+    /// Gets the range a defined name refers to.
+    /// </summary>
+    /// <param name="workbook">The workbook that defines the name.</param>
+    /// <param name="definedName">The defined name to resolve.</param>
+    /// <returns>The range the name refers to.</returns>
+    public static Excel.Range GetNameRange(Excel.Workbook workbook, string definedName)
+    {
+        ArgumentNullException.ThrowIfNull(workbook);
+
+        Excel.Names? names = null;
+        Excel.Name? name = null;
+        try
+        {
+            names = workbook.Names;
+
+            try
+            {
+                name = names.Item(definedName);
+                return name.RefersToRange;
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException("Defined name " + definedName
+                    + " was not found in the workbook, or does not refer to a range.", ex);
+            }
+        }
+        finally
+        {
+            ReleaseComObject(name);
+            ReleaseComObject(names);
+        }
+    }
+
+    /// <summary>
+    /// Lists every defined name of the workbook with the formula it refers to.
+    /// </summary>
+    /// <param name="workbook">The workbook to describe.</param>
+    /// <returns>The names, each with what it refers to.</returns>
+    /// <remarks>
+    /// The list includes the hidden names Excel maintains for the functions a workbook uses, ex. _xlfn.XLOOKUP, because
+    /// a caller checking what the names of a workbook refer to is asking about all of them.
+    /// </remarks>
+    public static IReadOnlyList<(string Name, string RefersTo)> GetNameDefinitions(Excel.Workbook workbook)
+    {
+        ArgumentNullException.ThrowIfNull(workbook);
+
+        var definitions = new List<(string, string)>();
+
+        Excel.Names? names = null;
+        try
+        {
+            names = workbook.Names;
+
+            for (int index = 1; index <= names.Count; index++)
+            {
+                Excel.Name? name = null;
+                try
+                {
+                    name = names.Item(index);
+                    definitions.Add((name.Name, name.RefersTo as string ?? string.Empty));
+                }
+                finally
+                {
+                    ReleaseComObject(name);
+                }
+            }
+        }
+        finally
+        {
+            ReleaseComObject(names);
+        }
+
+        return definitions;
+    }
+
+    /// <summary>
+    /// Deletes a defined name from the workbook.
+    /// </summary>
+    /// <param name="workbook">The workbook that defines the name.</param>
+    /// <param name="definedName">The name to delete.</param>
+    public static void DeleteName(Excel.Workbook workbook, string definedName)
+    {
+        ArgumentNullException.ThrowIfNull(workbook);
+
+        Excel.Names? names = null;
+        Excel.Name? name = null;
+        try
+        {
+            names = workbook.Names;
+
+            try
+            {
+                name = names.Item(definedName);
+                name.Delete();
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException("Defined name " + definedName + " could not be deleted.", ex);
+            }
+        }
+        finally
+        {
+            ReleaseComObject(name);
+            ReleaseComObject(names);
+        }
+    }
+
+    /// <summary>
+    /// Lists the worksheets of the workbook, in the order it holds them.
+    /// </summary>
+    /// <param name="workbook">The workbook to describe.</param>
+    /// <returns>The worksheet names.</returns>
+    public static IReadOnlyList<string> GetWorksheetNames(Excel.Workbook workbook)
+    {
+        ArgumentNullException.ThrowIfNull(workbook);
+
+        var names = new List<string>();
+
+        Excel.Sheets worksheets = workbook.Worksheets;
+        try
+        {
+            for (int index = 1; index <= worksheets.Count; index++)
+            {
+                Excel.Worksheet? worksheet = null;
+                try
+                {
+                    worksheet = (Excel.Worksheet)worksheets[index];
+                    names.Add(worksheet.Name);
+                }
+                finally
+                {
+                    ReleaseComObject(worksheet);
+                }
+            }
+        }
+        finally
+        {
+            ReleaseComObject(worksheets);
+        }
+
+        return names;
+    }
+
+    /// <summary>
+    /// Deletes a worksheet from the workbook.
+    /// </summary>
+    /// <param name="workbook">The workbook that holds the worksheet.</param>
+    /// <param name="worksheetName">The name of the worksheet to delete.</param>
+    /// <remarks>
+    /// Excel asks for confirmation before deleting a sheet that holds anything, so the caller's session must have
+    /// suppressed alerts, which <see cref="ExcelSession.SuspendCalculation"/> does.
+    /// </remarks>
+    public static void DeleteWorksheet(Excel.Workbook workbook, string worksheetName)
+    {
+        Excel.Worksheet worksheet = GetWorksheet(workbook, worksheetName);
+        try
+        {
+            worksheet.Delete();
+        }
+        catch (COMException ex)
+        {
+            throw new InvalidOperationException("Worksheet " + worksheetName + " could not be deleted.", ex);
+        }
+        finally
+        {
+            ReleaseComObject(worksheet);
+        }
+    }
+
+    /// <summary>
+    /// Reads the distance from the top of a worksheet to the top of each of its first rows, in points.
+    /// </summary>
+    /// <param name="worksheet">The worksheet to measure.</param>
+    /// <param name="rowCount">The number of rows to measure.</param>
+    /// <returns>
+    /// The tops, indexed by one based row, so that index zero is unused and index rowCount + 1 holds the top of the
+    /// row after the last one measured.
+    /// </returns>
+    /// <remarks>
+    /// This is what a check on the placement of a chart is expressed in: a chart is positioned in points and the data
+    /// it must not cover is positioned in rows, so one of the two has to be converted into the other's terms.  The
+    /// heights are measured rather than assumed, because a row whose height was changed by hand would otherwise move
+    /// every row beneath it out from under the check.
+    /// </remarks>
+    public static double[] GetRowTops(Excel.Worksheet worksheet, int rowCount)
+    {
+        ArgumentNullException.ThrowIfNull(worksheet);
+        ArgumentOutOfRangeException.ThrowIfLessThan(rowCount, 1);
+
+        var tops = new double[rowCount + 2];
+
+        for (int row = 1; row <= rowCount + 1; row++)
+        {
+            Excel.Range? cell = null;
+            try
+            {
+                cell = (Excel.Range)worksheet.Cells[row, 1];
+                tops[row] = (double)cell.Top;
+            }
+            finally
+            {
+                ReleaseComObject(cell);
+            }
+        }
+
+        return tops;
+    }
+
+    /// <summary>
+    /// Describes every chart on a worksheet by the name it carries and the box it occupies, in points.
+    /// </summary>
+    /// <param name="worksheet">The worksheet whose charts are wanted.</param>
+    /// <returns>The charts, in the order the worksheet holds them.</returns>
+    public static IReadOnlyList<(string Name, double Top, double Height)> GetChartBoxes(Excel.Worksheet worksheet)
+    {
+        ArgumentNullException.ThrowIfNull(worksheet);
+
+        var boxes = new List<(string, double, double)>();
+
+        Excel.ChartObjects charts = (Excel.ChartObjects)worksheet.ChartObjects();
+        try
+        {
+            for (int index = 1; index <= charts.Count; index++)
+            {
+                Excel.ChartObject? chart = null;
+                try
+                {
+                    chart = (Excel.ChartObject)charts.Item(index);
+                    boxes.Add((chart.Name, chart.Top, chart.Height));
+                }
+                finally
+                {
+                    ReleaseComObject(chart);
+                }
+            }
+        }
+        finally
+        {
+            ReleaseComObject(charts);
+        }
+
+        return boxes;
+    }
+
+    /// <summary>
+    /// Closes a workbook without saving it, and releases the reference to it.
+    /// </summary>
+    /// <param name="workbook">The workbook to close.  Null is ignored.</param>
+    /// <remarks>
+    /// This is for a workbook a session opened beside its own, ex. the one a transplant reads.  Nothing is saved
+    /// because nothing was written: a workbook opened to be read from is closed the way it was found.
+    /// </remarks>
+    public static void CloseWorkbook(Excel.Workbook? workbook)
+    {
+        if (workbook is null)
+        {
+            return;
+        }
+
+        try
+        {
+            workbook.Close(SaveChanges: false);
+        }
+        catch (COMException ex)
+        {
+            Log.Logger.Warning("PFM_EXCEL_COMPANION_CLOSE_FAILED: " + ex.Message);
+        }
+        finally
+        {
+            ReleaseComObject(workbook);
+        }
+    }
+
+    /// <summary>
     /// Releases one reference to a runtime callable wrapper.  Every helper that acquires an intermediate COM object
     /// releases it here so that Excel can shut down promptly.
     /// </summary>
@@ -1387,6 +2205,37 @@ public sealed class ExcelSession : IDisposable
         _excel.ScreenUpdating = false;
         _excel.EnableEvents = false;
         _excel.DisplayAlerts = false;
+    }
+
+    /// <summary>
+    /// Opens a second workbook in the Excel instance this session owns.
+    /// </summary>
+    /// <param name="filePath">The path to the workbook.</param>
+    /// <param name="readOnly">True to open it read only, which is what a caller that only reads it asks for.</param>
+    /// <returns>The opened workbook, which the caller closes with <see cref="ExcelUtils.CloseWorkbook"/>.</returns>
+    /// <remarks>
+    /// Two workbooks that are to be copied between have to be open in one instance, because a copy between instances
+    /// goes through the system clipboard rather than through Excel.  The companion is the caller's to close, and it is
+    /// closed before the session's own workbook is recalculated: a full calculation recalculates every workbook the
+    /// instance holds open.
+    /// </remarks>
+    public Excel.Workbook OpenCompanionWorkbook(string filePath, bool readOnly)
+    {
+        ArgumentNullException.ThrowIfNull(filePath);
+
+        string fullPath = Path.GetFullPath(filePath);
+
+        Excel.Workbooks workbooks = _excel.Workbooks;
+        try
+        {
+            Excel.Workbook opened = workbooks.Open(Filename: fullPath, UpdateLinks: 0, ReadOnly: readOnly);
+            Log.Logger.Information("PFM_EXCEL_COMPANION_OPENED: " + fullPath);
+            return opened;
+        }
+        finally
+        {
+            ExcelUtils.ReleaseComObject(workbooks);
+        }
     }
 
     /// <summary>
