@@ -20,9 +20,18 @@ public static class Operations
     private const string BackTestResultsName = "backtest";
     private const string MonteCarloResultsName = "montecarlo";
 
-    private const string RunConfigurationWorksheet = "RunConfiguration";
-    private const string CoalescedWorkbookPrefix = "PortfolioSimAnalysis.";
-    private const string CoalescedWorkbookExtension = ".xlsx";
+    /// <summary>
+    /// The name of the workbook one coalesced sweep is written to: the dataset, and nothing computed from it.
+    /// </summary>
+    private const string SweepWorkbookPrefix = "PortfolioSimData.";
+
+    /// <summary>
+    /// The name of the workbook one sweep's analysis is written to.  The two share a run id, so the dataset and the
+    /// analysis of one sweep sort together.
+    /// </summary>
+    private const string AnalysisWorkbookPrefix = "PortfolioSimAnalysis.";
+
+    private const string WorkbookExtension = ".xlsx";
 
     /// <summary>
     /// The number of result rows imported into the coalesced workbook per cross process call.  A block is one call
@@ -222,6 +231,55 @@ public static class Operations
         catch (UnauthorizedAccessException ex)
         {
             return Fail("PFM_COALESCE_ACCESS_ERROR: " + ex.Message, ex.Message, error);
+        }
+        finally
+        {
+            timer.ReportTotal();
+        }
+    }
+
+    /// <summary>
+    /// Applies the analysis of a template workbook to one coalesced sweep.
+    /// </summary>
+    /// <param name="arguments">The parsed command line arguments.</param>
+    /// <param name="output">The writer for normal output.</param>
+    /// <param name="error">The writer for error output.</param>
+    /// <returns>Zero when the workbook was written; otherwise one.</returns>
+    /// <remarks>
+    /// The analysis lives in the template, expressed in formulas, tables and charts, and this command does not describe
+    /// it a second time: it copies the template, writes the sweep into the copy, lets the template compute, checks what
+    /// it computed and flattens the result to values.  Neither the sweep it reads nor the template it copies is written
+    /// to, so an analysis can be applied to a dataset as often as it is useful to, and a dataset can be re-analysed
+    /// under a later version of the template.
+    /// </remarks>
+    public static int ApplyAnalysis(Arguments arguments, TextWriter output, TextWriter error)
+    {
+        ArgumentNullException.ThrowIfNull(arguments);
+        ArgumentNullException.ThrowIfNull(output);
+        ArgumentNullException.ThrowIfNull(error);
+
+        var timer = new DiagnosticTimer(arguments.Timing, output);
+
+        try
+        {
+            return RunApplyAnalysis(arguments, timer, output, error);
+        }
+        catch (COMException ex)
+        {
+            return Fail("PFM_APPLY_ANALYSIS_EXCEL_ERROR: " + ex.Message, "Excel reported an error: "
+                + ex.Message, error);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Fail("PFM_APPLY_ANALYSIS_INPUT_ERROR: " + ex.Message, ex.Message, error);
+        }
+        catch (IOException ex)
+        {
+            return Fail("PFM_APPLY_ANALYSIS_IO_ERROR: " + ex.Message, ex.Message, error);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return Fail("PFM_APPLY_ANALYSIS_ACCESS_ERROR: " + ex.Message, ex.Message, error);
         }
         finally
         {
@@ -438,8 +496,7 @@ public static class Operations
         string outputDirectory = Path.GetFullPath(arguments.OutputPath);
         Directory.CreateDirectory(outputDirectory);
 
-        string targetPath = Path.Combine(outputDirectory,
-            CoalescedWorkbookPrefix + sweep.RunId + CoalescedWorkbookExtension);
+        string targetPath = Path.Combine(outputDirectory, SweepWorkbookPrefix + sweep.RunId + WorkbookExtension);
 
         // The run id is derived from the sweep, so coalescing one twice names the same workbook both times.  That is
         // what makes the name meaningful, and it is also why an existing one is reported rather than written over: the
@@ -494,6 +551,147 @@ public static class Operations
     }
 
     /// <summary>
+    /// Copies the template, transplants the sweep into the copy and saves it.  The exceptions this may raise are
+    /// handled by <see cref="ApplyAnalysis"/>.
+    /// </summary>
+    /// <param name="arguments">The parsed command line arguments.</param>
+    /// <param name="timer">The timer that measures the phases of the operation.</param>
+    /// <param name="output">The writer for normal output.</param>
+    /// <param name="error">The writer for error output.</param>
+    /// <returns>Zero when the workbook was written; otherwise one.</returns>
+    /// <remarks>
+    /// The template is copied and the copy is driven, rather than the analysis being copied into the workbook holding
+    /// the sweep, because worksheets carried between workbooks bring their defined names with them as external
+    /// references: they resolve against whatever copy of the source is open and read the wrong sweep without saying so.
+    /// Copying the file first also means the command owns its output from the beginning, and can take it away again if
+    /// the analysis does not hold up.
+    /// </remarks>
+    private static int RunApplyAnalysis(Arguments arguments, DiagnosticTimer timer, TextWriter output,
+        TextWriter error)
+    {
+        string sourcePath = Path.GetFullPath(RequireFilePath(arguments));
+        string templatePath = Path.GetFullPath(RequireTemplatePath(arguments));
+        string runId = RunIdOf(sourcePath);
+
+        string outputDirectory = Path.GetFullPath(arguments.OutputPath);
+        Directory.CreateDirectory(outputDirectory);
+
+        string targetPath = Path.Combine(outputDirectory, AnalysisWorkbookPrefix + runId + WorkbookExtension);
+
+        // The output is named after the sweep rather than after the analysis, so applying a later version of the
+        // template to a sweep already analysed resolves to the name already taken.  What is there is reported rather
+        // than replaced: which version of the analysis produced it is stated in the workbook itself, and this command
+        // cannot tell whether the file already there is the one being superseded or the one being asked for.
+        if (File.Exists(targetPath))
+        {
+            return Fail("PFM_APPLY_ANALYSIS_TARGET_EXISTS: " + targetPath,
+                "The workbook " + targetPath + " already holds the analysis of this sweep.  Delete it, or choose "
+                + "another --output-path, to apply the analysis again.", error);
+        }
+
+        output.WriteLine("Applying the analysis of " + templatePath + " to run " + runId + " of "
+            + Path.GetFileName(sourcePath) + ".");
+
+        using (IDisposable scope = timer.Measure("copy template"))
+        {
+            File.Copy(templatePath, targetPath);
+        }
+
+        try
+        {
+            ExcelSession session = OpenWorkbook(targetPath, timer);
+            try
+            {
+                session.SuspendCalculation();
+
+                AnalysisOutcome outcome = new AnalysisTransplant(session, timer, output).Apply(sourcePath, runId);
+
+                using (IDisposable scope = timer.Measure("save workbook"))
+                {
+                    session.Save();
+                }
+
+                Log.Logger.Information("PFM_APPLY_ANALYSIS_COMPLETE: runId=" + runId + " templateVersion="
+                    + outcome.TemplateVersion + " simulations=" + Format(outcome.SimulationCount) + " workbook="
+                    + targetPath);
+
+                output.WriteLine("Applied the analysis to " + Format(outcome.SimulationCount) + " simulations over "
+                    + Format(outcome.Checks.ProjectionYearCount) + " years from "
+                    + Format(outcome.Checks.FirstProjectionYear) + ", of which "
+                    + Format(outcome.Checks.BelowFloorCount) + " fell below the income floor.");
+                output.WriteLine("Wrote " + targetPath + ".");
+                output.WriteLine(outcome.Provenance);
+
+                return 0;
+            }
+            finally
+            {
+                using IDisposable scope = timer.Measure("close workbook");
+                session.Dispose();
+            }
+        }
+        catch
+        {
+            // A copy of the template that has been half written is not a workbook anybody should be handed: it holds
+            // the analysis of no sweep, or of two.  The failure is reported by the caller either way.
+            DiscardOutput(targetPath);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Deletes the output of an application of the analysis that did not finish.
+    /// </summary>
+    /// <param name="targetPath">The path of the output workbook.</param>
+    private static void DiscardOutput(string targetPath)
+    {
+        try
+        {
+            File.Delete(targetPath);
+            Log.Logger.Information("PFM_APPLY_ANALYSIS_DISCARDED: " + targetPath);
+        }
+        catch (IOException ex)
+        {
+            Log.Logger.Warning("PFM_APPLY_ANALYSIS_DISCARD_FAILED: " + targetPath + " " + ex.Message);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Log.Logger.Warning("PFM_APPLY_ANALYSIS_DISCARD_FAILED: " + targetPath + " " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Reads the run id of a sweep off the name of the workbook holding it.
+    /// </summary>
+    /// <param name="sourcePath">The path of the workbook holding the sweep.</param>
+    /// <returns>The run id.</returns>
+    /// <remarks>
+    /// The dataset and the analysis of one sweep are named for the same run, which is what pairs them in a directory
+    /// listing and what makes the analysis of a sweep identifiable at all: the run id is derived from the configuration
+    /// the sweep exercised and the directories its jobs left behind.  Rather than derive it a second time here, from a
+    /// workbook that no longer holds those directory names, it is read off the name coalesce gave the file.
+    /// </remarks>
+    private static string RunIdOf(string sourcePath)
+    {
+        string fileName = Path.GetFileName(sourcePath);
+
+        if (fileName.StartsWith(SweepWorkbookPrefix, StringComparison.OrdinalIgnoreCase)
+            && fileName.EndsWith(WorkbookExtension, StringComparison.OrdinalIgnoreCase))
+        {
+            string runId = fileName[SweepWorkbookPrefix.Length..^WorkbookExtension.Length];
+
+            if (runId.Length > 0)
+            {
+                return runId;
+            }
+        }
+
+        throw new InvalidOperationException("The workbook " + fileName + " is not named for a sweep: a coalesced sweep "
+            + "is " + SweepWorkbookPrefix + "<run id>" + WorkbookExtension + ", and its run id is what the analysis of "
+            + "it is named and stamped with.");
+    }
+
+    /// <summary>
     /// Renames the workbook's first worksheet and writes the configuration the sweep was driven from into it: the
     /// synopsis one line per row, then the structured tables stacked one after another beneath it.
     /// </summary>
@@ -515,14 +713,9 @@ public static class Operations
         Excel.Worksheet worksheet = ExcelUtils.GetWorksheet(session.Workbook, 1);
         try
         {
-            worksheet.Name = RunConfigurationWorksheet;
+            worksheet.Name = AnalysisTemplate.RunConfigurationWorksheet;
 
-            int nextRow = WriteSynopsis(worksheet, sweep.RunConfiguration);
-
-            foreach (ConfigurationTable table in sweep.ConfigurationTables)
-            {
-                nextRow = WriteConfigurationTable(worksheet, table, nextRow);
-            }
+            RunConfigurationSheet.Write(worksheet, sweep.RunConfiguration, sweep.ConfigurationTables);
         }
         finally
         {
@@ -530,90 +723,8 @@ public static class Operations
         }
 
         output.WriteLine("Wrote " + Format(sweep.RunConfiguration.Count) + " lines of run configuration and "
-            + Format(sweep.ConfigurationTables.Count) + " configuration tables to " + RunConfigurationWorksheet + ".");
-    }
-
-    /// <summary>
-    /// Writes the synopsis into the top of the run configuration worksheet.
-    /// </summary>
-    /// <param name="worksheet">The worksheet being written.</param>
-    /// <param name="lines">The lines of the synopsis.</param>
-    /// <returns>The one based row the next block starts at, one blank row below the synopsis.</returns>
-    [SuppressMessage("Performance", "CA1814:Prefer jagged arrays over multidimensional",
-        Justification = "Excel marshals a multi cell range as a rectangular variant array.")]
-    private static int WriteSynopsis(Excel.Worksheet worksheet, IReadOnlyList<string> lines)
-    {
-        if (lines.Count == 0)
-        {
-            return 1;
-        }
-
-        // The synopsis is a report rather than data: its cells are formatted as text before anything is written, so a
-        // line reading like a date or beginning with an equals sign is stored as the workbook wrote it.  Only those
-        // cells, because the tables below hold numbers, and a number written into a text formatted cell is text.
-        ExcelUtils.FormatRangeAsText(worksheet, 1, 1, lines.Count, 1);
-
-        var block = new object?[lines.Count, 1];
-        for (int row = 0; row < lines.Count; row++)
-        {
-            block[row, 0] = lines[row];
-        }
-
-        ExcelUtils.WriteGrid(worksheet, 1, 1, block);
-
-        return lines.Count + 2;
-    }
-
-    /// <summary>
-    /// Writes one configuration table into the run configuration worksheet: a label naming it, then its headings and
-    /// rows as an Excel table.
-    /// </summary>
-    /// <param name="worksheet">The worksheet being written.</param>
-    /// <param name="table">The table to write.</param>
-    /// <param name="firstRow">The one based row the label goes on.</param>
-    /// <returns>The one based row the next block starts at, one blank row below this one.</returns>
-    /// <remarks>
-    /// The block is defined as an Excel table rather than left as a grid, so that it can be filtered and referred to
-    /// by name in the analysis the coalesced workbook exists for.  A table the plan left empty is written as its
-    /// headings and one blank row, which is the smallest table Excel holds.
-    /// </remarks>
-    [SuppressMessage("Performance", "CA1814:Prefer jagged arrays over multidimensional",
-        Justification = "Excel marshals a multi cell range as a rectangular variant array.")]
-    private static int WriteConfigurationTable(Excel.Worksheet worksheet, ConfigurationTable table, int firstRow)
-    {
-        var label = new object?[1, 1] { { table.Name } };
-        ExcelUtils.WriteGrid(worksheet, firstRow, 1, label);
-        ExcelUtils.SetCellBold(worksheet, firstRow, 1);
-
-        int headerRow = firstRow + 1;
-
-        var headings = new object?[1, table.Header.Count];
-        for (int column = 0; column < table.Header.Count; column++)
-        {
-            headings[0, column] = table.Header[column];
-        }
-
-        ExcelUtils.WriteGrid(worksheet, headerRow, 1, headings);
-
-        if (table.Rows.Count > 0)
-        {
-            var values = new object?[table.Rows.Count, table.Header.Count];
-            for (int row = 0; row < table.Rows.Count; row++)
-            {
-                object?[] source = table.Rows[row];
-                for (int column = 0; column < table.Header.Count && column < source.Length; column++)
-                {
-                    values[row, column] = source[column];
-                }
-            }
-
-            ExcelUtils.WriteGrid(worksheet, headerRow + 1, 1, values);
-        }
-
-        int bodyRows = Math.Max(table.Rows.Count, 1);
-        ExcelUtils.AddTable(worksheet, table.Name, headerRow, 1, bodyRows + 1, table.Header.Count);
-
-        return headerRow + bodyRows + 2;
+            + Format(sweep.ConfigurationTables.Count) + " configuration tables to "
+            + AnalysisTemplate.RunConfigurationWorksheet + ".");
     }
 
     /// <summary>
@@ -635,7 +746,7 @@ public static class Operations
     {
         using IDisposable scope = timer.Measure("import results");
 
-        Excel.Worksheet worksheet = ExcelUtils.AddWorksheet(session.Workbook, sweep.DataWorksheetName);
+        Excel.Worksheet worksheet = ExcelUtils.AddWorksheet(session.Workbook, AnalysisTemplate.SimDataWorksheet);
         try
         {
             IReadOnlyList<string>? header = null;
@@ -976,6 +1087,19 @@ public static class Operations
         return arguments.FilePath
             ?? throw new InvalidOperationException("The command " + arguments.Command
                 + " operates on a workbook, and no --file-path was given.");
+    }
+
+    /// <summary>
+    /// Reads the path of the analysis template from the arguments, which the command line requires of the command that
+    /// applies it.
+    /// </summary>
+    /// <param name="arguments">The parsed command line arguments.</param>
+    /// <returns>The path of the template.</returns>
+    private static string RequireTemplatePath(Arguments arguments)
+    {
+        return arguments.TemplatePath
+            ?? throw new InvalidOperationException("The command " + arguments.Command
+                + " applies the analysis of a template workbook, and no --template was given.");
     }
 
     /// <summary>

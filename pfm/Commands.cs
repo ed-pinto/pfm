@@ -44,6 +44,13 @@ public enum Commands
     Coalesce,
 
     /// <summary>
+    /// Applies the analysis of a template workbook to one coalesced sweep, by writing the sweep into a copy of the
+    /// template and flattening what the template computes from it.
+    /// </summary>
+    [EnumMember(Value = "ApplyAnalysis")]
+    ApplyAnalysis,
+
+    /// <summary>
     /// There are many configurations in the workbook affected by the year in which tax residency changes to Canada.
     /// Ex. When IRA positions stop being purchased.
     /// This command updates all related configurations including 10_Parameters.

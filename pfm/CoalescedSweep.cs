@@ -66,8 +66,9 @@ public sealed class CoalescedSweep
 {
     /// <summary>
     /// The results file each job writes, matched by the name of the simulation that produced it.  A sweep names its
-    /// files after the command that ran, which is lower case; the canonical spelling is what the coalesced workbook
-    /// names its sheet after.
+    /// files after the command that ran, which is lower case; the canonical spelling is how a run of that simulation is
+    /// reported.  The worksheet the results are imported into is not named after it: which simulation produced a sweep
+    /// is stated on its RunConfiguration worksheet, and one worksheet name is what lets one analysis read either.
     /// </summary>
     private static readonly Dictionary<string, string> TestTypes = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -139,11 +140,6 @@ public sealed class CoalescedSweep
     /// Gets the eight character identifier of this sweep, which the coalesced workbook is named for.
     /// </summary>
     public string RunId { get; }
-
-    /// <summary>
-    /// Gets the name of the worksheet the results are imported into, ex. BackTestData.
-    /// </summary>
-    public string DataWorksheetName => TestType + "Data";
 
     /// <summary>
     /// Finds the run directories of a sweep under a directory and checks that they are a complete set.

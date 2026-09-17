@@ -11,10 +11,30 @@ public class Arguments
     public required Commands Command { get; init; }
 
     /// <summary>
-    /// The file path to the PortfolioManager.xlsx file on which to operate, or null for a command that does not
-    /// operate on a workbook, ex. <see cref="Commands.Coalesce"/>.
+    /// The path of the workbook the command was pointed at by --file-path, or null for a command that is pointed at no
+    /// workbook, ex. <see cref="Commands.Coalesce"/>, which reads what a finished sweep left on disk.
     /// </summary>
+    /// <remarks>
+    /// Which workbook that is belongs to the command rather than to this property, and the two kinds are not
+    /// interchangeable: the commands that drive the model are pointed at PortfolioManager.xlsx, and
+    /// <see cref="Commands.ApplyAnalysis"/> is pointed at the workbook of one coalesced sweep, ex.
+    /// PortfolioSimData.48a0f144.xlsx.  It is one property because it is one option, declared by each command in its
+    /// own words and read, validated and logged the same way for all of them; a second property would hold the same
+    /// kind of value, leave one of the two empty on every run, and still not say which workbook was meant without
+    /// naming the command.  The analysis template is a property of its own, <see cref="TemplatePath"/>, because it is
+    /// an option of its own.
+    /// </remarks>
     public string? FilePath { get; init; }
+
+    /// <summary>
+    /// The path to the analysis template workbook a sweep is analysed against, or null for a command that applies no
+    /// analysis.
+    /// </summary>
+    /// <remarks>
+    /// The template holds the whole of the analysis, expressed in its own formulas, tables and charts.  It is never
+    /// written to: the command that applies it copies it and writes the sweep into the copy.
+    /// </remarks>
+    public string? TemplatePath { get; init; }
 
     /// <summary>
     /// The directory holding the run directories of the sweep being coalesced.  Defaults to the current directory.
@@ -22,7 +42,8 @@ public class Arguments
     public string InputPath { get; init; } = "./";
 
     /// <summary>
-    /// The directory the coalesced workbook is written to.  Defaults to output under the current directory.
+    /// The directory the coalesced workbook, or the analysis of one, is written to.  Defaults to output under the
+    /// current directory.
     /// </summary>
     public string OutputPath { get; init; } = "./output";
 

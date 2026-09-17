@@ -29,7 +29,7 @@ param(
 )
 
 if (-not $Command) {
-    throw "A pfm command is required, ex. iterate, back-test, monte-carlo or coalesce."
+    throw "A pfm command is required, ex. iterate, back-test, monte-carlo, coalesce or apply-analysis."
 }
 
 $PfmExe = Join-Path $PSScriptRoot "..\pfm\bin\Debug\net10.0\pfm.exe"
@@ -40,14 +40,15 @@ $PfmExe = Join-Path $PSScriptRoot "..\pfm\bin\Debug\net10.0\pfm.exe"
 $DefaultPortfolioFile = "H:\OneDrive\Documents\Financials\Planning\Portfolio\PortfolioManager.xlsx"
 $PortfolioFile = if ($PfmPortfolioFile) { $PfmPortfolioFile } else { $DefaultPortfolioFile }
 
-# coalesce reads what a finished sweep left on disk and has no workbook to be pointed at, so it is the one command
-# that is not given -f.  Naming the exceptions rather than the workbook commands means a command added later gets
+# coalesce reads what a finished sweep left on disk and has no workbook to be pointed at, and apply-analysis is
+# pointed at one sweep's workbook and the analysis template rather than at the model, so neither is given the
+# portfolio file.  Naming the exceptions rather than the commands that do take it means a command added later gets
 # the workbook without a change here.
-$CommandsWithoutWorkbook = @("coalesce")
+$CommandsWithoutPortfolioFile = @("coalesce", "apply-analysis")
 
 $PfmArgs = @($Command)
 
-if ($CommandsWithoutWorkbook -notcontains $Command) {
+if ($CommandsWithoutPortfolioFile -notcontains $Command) {
     $PfmArgs += @("-f", $PortfolioFile)
 }
 

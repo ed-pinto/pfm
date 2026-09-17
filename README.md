@@ -206,7 +206,7 @@ the job count they agree on that identifies the sweep.
 
 ### The workbook
 
-The workbook is written as `<output-path>/PortfolioSimAnalysis.<run-id>.xlsx`, where the run id is eight hexadecimal
+The workbook is written as `<output-path>/PortfolioSimData.<run-id>.xlsx`, where the run id is eight hexadecimal
 characters derived from [the run configuration](#run-configuration) and the run directory names. The configuration is
 most of what the identifier is for, since it is the plan the sweep exercised and what a reader comparing two of these
 workbooks is comparing; both the synopsis and the tables are folded in, because the synopsis is a summary and two plans
@@ -218,7 +218,7 @@ reported rather than replaced.
 | Sheet | Contents |
 | --- | --- |
 | `RunConfiguration` | The configuration the sweep was driven from, read from the first job: the synopsis at the top, one line per row of column A, and then each of the [configuration tables](#run-configuration) beneath it, stacked down the sheet with a blank row between them. Every job of a sweep drives a copy of one workbook, so they all record the same configuration. The synopsis cells are formatted as text so that it reads back exactly as the workbook wrote it; each table is labelled with its name and defined as an Excel table, so it can be filtered and referred to by name. |
-| `BackTestData` or `MonteCarloData` | The header row once, then the data rows of every job in job index order, which is the order that reproduces what a single job would have written. The sheet is named after the simulation that produced the results. |
+| `SimData` | The header row once, then the data rows of every job in job index order, which is the order that reproduces what a single job would have written. The sheet carries one name whichever simulation produced it: which one it was is stated on `RunConfiguration`, and a name that varied would buy a branch in every reader of the sheet and nothing for a person. |
 
 Fields are imported as the types they were written from: numbers as numbers, `TRUE` and `FALSE` as booleans, and an
 empty field as an empty cell, so the sheet can be charted and filtered without converting anything first. The full
@@ -227,3 +227,94 @@ precision of each value survives the round trip.
 Every job's header is checked against the first job's. Two that disagree are results of different plans, or of
 different projection horizons, and concatenating them would produce a sheet whose columns meant different things in
 different rows.
+## apply-analysis
+
+Applies the analysis of a template workbook to one coalesced sweep, and writes the result as a workbook of values.
+
+```
+pfm apply-analysis -f <sweep workbook> --template <analysis template>
+pfm apply-analysis -f <sweep workbook> --template <analysis template> --output-path <directory>
+```
+
+`--file-path` is the workbook [coalesce](#coalesce) wrote, `PortfolioSimData.<run-id>.xlsx`, and `--template` is the
+analysis template, `PortfolioSimAnalysis.xlsx`. Neither is written to. The output is
+`<output-path>/PortfolioSimAnalysis.<run-id>.xlsx`, named for the same run as the data it analyses, so the two sort
+together in a listing; `--output-path` defaults to `output` beneath the current directory.
+
+### The analysis lives in the template
+
+The template is a workbook, authored by hand, that holds the whole of the analysis: some 3400 formulas, 81 defined
+names, 15 charts, the conditional formatting, and an `AnalysisSpec` worksheet stating why each of them is what it is.
+This command does not describe any of that a second time. It copies the template, writes the sweep into the copy, lets
+the template compute, checks what it computed, and flattens the result to values.
+
+What the command knows about the template is three references wide, which is the whole of the coupling between a dataset
+and the analysis of it:
+
+| The template reads | Formulas | For |
+| --- | --- | --- |
+| `SimData`, the table over the results | 1579 | Every metric of every simulation, addressed by header text rather than by position |
+| `TargetNetIncomeEras`, a table on `RunConfiguration` | 79 | The income target and floor of each projected year |
+| `RunConfiguration!A1` | 1 | The title line of the sweep, echoed under the heading of the analysis |
+
+No formula and no chart series names the worksheet the results are on, which is why one analysis reads a back test and a
+Monte Carlo campaign without a change.
+
+### What it does
+
+1. Copies the template to the output name. The copy is the workbook that is driven; the template is only ever read.
+2. Reads the sweep's configuration and results out of the sweep workbook, opened beside the copy and closed again
+   before anything is recalculated.
+3. Writes the configuration onto the copy's `RunConfiguration`, resizing each table to the rows this plan states and
+   moving the blocks below it by inserting or deleting whole worksheet rows.
+4. Writes the results onto the copy's `SimData`, resizing the table over them and clearing whatever the last sweep left
+   beyond them.
+5. Recalculates every formula, not only the ones Excel marked dirty: the spills the analysis is built on resize against
+   the table that has just been redefined.
+6. Checks the analysis (below). A failure names what broke and leaves no workbook behind.
+7. Stamps the provenance line into `SimAnalysis!B2`: the template version, the run id, the workbook the sweep was read
+   from, and the time of the run.
+8. Flattens `SimAnalysis` and then `SimAnalysisCalc` to values, drops the defined names that only mean anything while
+   those formulas are live, removes `AnalysisSpec`, and saves.
+
+The tables are resized rather than replaced throughout, because a table that is dissolved takes its references with it:
+Excel rewrites every formula that read it structurally into the cell range it happened to occupy, so the next sweep
+would be read through the last one's geometry with nothing reported. For the same reason the results are written as
+values into the cells of the table rather than pasted over it, and the heading row is written on its own: a single write
+covering a table's whole block, heading row included, replaces the table the way a paste does.
+
+### The output workbook
+
+Four worksheets, all values: `RunConfiguration`, `SimData`, `SimAnalysisCalc` and `SimAnalysis`. Nothing in it can
+recalculate, which is the point of it: the inputs of the analysis were decided in the template, and a question about how
+a figure was derived is answered by opening the template rather than by editing the output.
+
+What survives the flatten is what a reader needs: the number formats, the conditional formatting, the tables `SimData`
+can still be filtered through, the `#N/A` of a trial slot with no trial to plot, and the charts, which need no attention
+because every series reads a range that still holds the same values. What does not survive is the names anchored to a
+spill, which refer to nothing once the spill is a block of values.
+
+`SimAnalysis` and `SimAnalysisCalc` are flattened in that order. The names the analysis is built on are anchored to the
+spills on the calculation sheet, so flattening the calculation sheet first would leave every figure that reads one of
+those names saved as `#REF!`.
+
+An analysis re-applied to a sweep already analysed resolves to the name already taken, and the workbook that is there is
+reported rather than replaced, as `coalesce` does with its own output. Which version of the analysis produced a workbook
+is stated in the workbook, not in its name.
+
+### The checks
+
+Every check runs before any of them is reported, so a template or a harvest that needs fixing is described once rather
+than one line at a time. They are the validation list of the `AnalysisSpec` worksheet:
+
+| Check | What it catches |
+| --- | --- |
+| Every metric key the analysis states resolves to a block of `<MetricKey>_<YYYY>` columns the results carry | A harvest that renamed or dropped a metric. This is the one check that fails on a dataset the template cannot analyse at all, and it names the metric and the column it could not find |
+| `SimulationCount` equals the rows written; `ProjectionYearCount` and `FirstProjectionYear` agree with the headers | A table that does not cover the sweep, ex. one left at the previous sweep's geometry |
+| The sweep projects at most 39 years | A horizon the analysis has no room for. The blocks occupy `B:AN`, so a longer one is a change to the template rather than a dataset it can be applied to |
+| A simulation is identified by at most 5 columns | A sweep whose per-simulation diagnostics would reach into the block beside them. A back test identifies a simulation by three columns and a Monte Carlo campaign by two, and each diagnostic on the calculation sheet is one column wider than that. Excel reports the collision as `#SPILL!` on one cell and says nothing about the sweep that provoked it |
+| No defined name refers to anything bracketed | A name carried in from another workbook, which resolves against whatever copy of that file is open and reads the wrong sweep without saying so |
+| No cell holds an error other than the `#N/A` of a blank trial slot, and no cell's value is a string beginning with `=` | A formula that did not take |
+| Every year header row holds 39 years rather than one | A year header row formatted as text before its formula was written, which spills nothing and fails silently while the chart above it still renders |
+| No chart's bottom edge passes the top of the next non-blank row | A chart covering the block below it, which a reader of a workbook with no formulas cannot fix |
+| The count of simulations that fell below the income floor is bracketed by what the `IncomeShortfall` columns report | An analysis reading the wrong columns. This is the one check that reads the results themselves rather than what the analysis says about them |
