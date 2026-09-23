@@ -58,8 +58,9 @@ public static class RunConfigurationSheet
     /// <param name="synopsis">The lines of the synopsis, in order.</param>
     /// <param name="tables">The structured tables, in the order they are stacked down the sheet.</param>
     /// <exception cref="InvalidOperationException">
-    /// A table of this sweep no longer carries a column the table on the worksheet does, so the analysis reading that
-    /// column by name would be reading something else.
+    /// The worksheet carries no table of its own for one of this sweep's configuration tables, so there is nothing to
+    /// resize; or a table of this sweep no longer carries a column the table on the worksheet does, so the analysis
+    /// reading that column by name would be reading something else.
     /// </exception>
     /// <remarks>
     /// The tables are resized rather than replaced, and the blocks are moved by inserting and deleting whole worksheet
@@ -85,7 +86,7 @@ public static class RunConfigurationSheet
 
         foreach (ConfigurationTable table in tables)
         {
-            Excel.ListObject listObject = ExcelUtils.GetTable(worksheet, table.Name);
+            Excel.ListObject listObject = GetTableBeingWritten(worksheet, table.Name);
             try
             {
                 (int headerRow, int firstColumn, int rowCount, _) = ExcelUtils.GetTableExtent(listObject);
@@ -139,7 +140,7 @@ public static class RunConfigurationSheet
 
         foreach (string tableName in RunConfiguration.TableNames)
         {
-            Excel.ListObject listObject = GetRequiredTable(worksheet, tableName);
+            Excel.ListObject listObject = GetRecordedTable(worksheet, tableName);
             try
             {
                 (int headerRow, _, _, _) = ExcelUtils.GetTableExtent(listObject);
@@ -169,7 +170,7 @@ public static class RunConfigurationSheet
     /// </remarks>
     private static void MoveFirstTable(Excel.Worksheet worksheet, int synopsisLines)
     {
-        Excel.ListObject listObject = GetRequiredTable(worksheet, RunConfiguration.TableNames[0]);
+        Excel.ListObject listObject = GetTableBeingWritten(worksheet, RunConfiguration.TableNames[0]);
         try
         {
             (int headerRow, _, _, _) = ExcelUtils.GetTableExtent(listObject);
@@ -357,12 +358,46 @@ public static class RunConfigurationSheet
     }
 
     /// <summary>
-    /// Gets a configuration table of the worksheet by name.
+    /// Gets a configuration table of a worksheet a sweep was recorded onto.
     /// </summary>
     /// <param name="worksheet">The worksheet that hosts the table.</param>
     /// <param name="tableName">The name of the table.</param>
     /// <returns>The table.</returns>
-    private static Excel.ListObject GetRequiredTable(Excel.Worksheet worksheet, string tableName)
+    private static Excel.ListObject GetRecordedTable(Excel.Worksheet worksheet, string tableName)
+    {
+        return GetRequiredTable(worksheet, tableName,
+            "A workbook that records a sweep carries one table per configuration table of the plan, and the analysis "
+            + "resolves the income target and floor through them.");
+    }
+
+    /// <summary>
+    /// Gets a configuration table of a worksheet this sweep is being written onto.
+    /// </summary>
+    /// <param name="worksheet">The worksheet that hosts the table.</param>
+    /// <param name="tableName">The name of the table.</param>
+    /// <returns>The table.</returns>
+    /// <remarks>
+    /// This is the other side of the same layout and it fails for a different reason, so it says so: the worksheet here
+    /// is the analysis template's, which is authored by hand and can therefore be a table behind the plan the sweeps
+    /// now record.
+    /// </remarks>
+    private static Excel.ListObject GetTableBeingWritten(Excel.Worksheet worksheet, string tableName)
+    {
+        return GetRequiredTable(worksheet, tableName,
+            "The tables of this sheet are resized rather than replaced, so the workbook being written carries one of "
+            + "its own for every configuration table the sweep records and there is nothing to resize without it.  A "
+            + "table the plan has gained since is added to the analysis template before a sweep carrying it can be "
+            + "applied.");
+    }
+
+    /// <summary>
+    /// Gets a configuration table of a worksheet by name.
+    /// </summary>
+    /// <param name="worksheet">The worksheet that hosts the table.</param>
+    /// <param name="tableName">The name of the table.</param>
+    /// <param name="explanation">What a missing table means on this worksheet, and what to do about it.</param>
+    /// <returns>The table.</returns>
+    private static Excel.ListObject GetRequiredTable(Excel.Worksheet worksheet, string tableName, string explanation)
     {
         try
         {
@@ -371,8 +406,7 @@ public static class RunConfigurationSheet
         catch (InvalidOperationException ex)
         {
             throw new InvalidOperationException("The configuration table " + tableName + " was not found on worksheet "
-                + worksheet.Name + ".  A workbook that records a sweep carries one table per configuration table of the "
-                + "plan, and the analysis resolves the income target and floor through them.", ex);
+                + worksheet.Name + ".  " + explanation, ex);
         }
     }
 }

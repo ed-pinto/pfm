@@ -88,20 +88,24 @@ public sealed class AnalysisChecks
 
         var failures = new List<string>();
 
-        MetricBlocks blocks = MetricBlocks.Read(header, failures);
+        MetricBlocks blocks = MetricBlocks.Read(header, ReadShortfallMetricKey(workbook), failures);
 
         int yearCount = (int)ExcelUtils.GetNameNumber(workbook, AnalysisTemplate.ProjectionYearCountName);
         int firstYear = (int)ExcelUtils.GetNameNumber(workbook, AnalysisTemplate.FirstProjectionYearName);
         int identityColumns = (int)ExcelUtils.GetNameNumber(workbook, AnalysisTemplate.IdentityColumnCountName);
         int simulations = (int)ExcelUtils.GetNameNumber(workbook, AnalysisTemplate.SimulationCountName);
 
-        CheckDerivedCounts(blocks, rowCount, simulations, yearCount, firstYear, identityColumns, failures);
+        IReadOnlyList<string> worksheets =
+            AnalysisTemplate.FlattenedWorksheetsOf(ExcelUtils.GetWorksheetNames(workbook));
+
+        CheckDerivedCounts(blocks, rowCount, simulations, yearCount, firstYear, identityColumns,
+            ReadYearColumnCapacity(workbook), failures);
         CheckMetricKeys(workbook, blocks, yearCount, firstYear, failures);
         CheckYearHeaderRows(workbook, yearCount, failures);
         CheckNames(workbook, failures);
 
-        int blankTrialSlots = CheckCellContents(workbook, failures);
-        CheckChartClearance(workbook, failures);
+        int blankTrialSlots = CheckCellContents(workbook, worksheets, failures);
+        CheckChartClearance(workbook, worksheets, failures);
 
         int belowFloor = CheckShortfallReconciliation(workbook, blocks, rowCount, failures);
 
@@ -128,9 +132,12 @@ public sealed class AnalysisChecks
     /// <param name="yearCount">The count of year columns the analysis derived.</param>
     /// <param name="firstYear">The first projected year the analysis derived.</param>
     /// <param name="identityColumns">The count of identity columns the analysis derived.</param>
+    /// <param name="yearColumnCapacity">
+    /// The number of year columns the template has room for, or zero when it states none.
+    /// </param>
     /// <param name="failures">The list every failure is added to.</param>
     private static void CheckDerivedCounts(MetricBlocks blocks, int rowCount, int simulations, int yearCount,
-        int firstYear, int identityColumns, List<string> failures)
+        int firstYear, int identityColumns, int yearColumnCapacity, List<string> failures)
     {
         if (simulations != rowCount)
         {
@@ -141,8 +148,7 @@ public sealed class AnalysisChecks
         if (blocks.Years.Count > 0 && yearCount != blocks.Years.Count)
         {
             failures.Add(AnalysisTemplate.ProjectionYearCountName + " is " + Format(yearCount) + " and the results "
-                + "carry " + Format(blocks.Years.Count) + " year columns of " + AnalysisTemplate.HorizonMetricKey
-                + ".");
+                + "carry " + Format(blocks.Years.Count) + " projected years.");
         }
 
         if (blocks.Years.Count > 0 && firstYear != blocks.Years[0])
@@ -151,11 +157,11 @@ public sealed class AnalysisChecks
                 + "projected year of the results is " + Format(blocks.Years[0]) + ".");
         }
 
-        if (yearCount > AnalysisTemplate.MaxYearColumns)
+        if (yearColumnCapacity > 0 && yearCount > yearColumnCapacity)
         {
-            failures.Add("The sweep projects " + Format(yearCount) + " years and the analysis has room for "
-                + Format(AnalysisTemplate.MaxYearColumns) + ".  A longer horizon is a change to the template rather "
-                + "than a dataset it can be applied to.");
+            failures.Add("The sweep projects " + Format(yearCount) + " years and the year header rows of the analysis "
+                + "are " + Format(yearColumnCapacity) + " columns wide.  A longer horizon is a change to the template "
+                + "rather than a dataset it can be applied to.");
         }
 
         if (blocks.IdentityColumnCount >= 0 && identityColumns != blocks.IdentityColumnCount)
@@ -172,6 +178,105 @@ public sealed class AnalysisChecks
                 + "the block beside it; making room for it is a change to the template rather than a dataset it can be "
                 + "applied to.");
         }
+    }
+
+    /// <summary>
+    /// Reads how many year columns the template has room for, off the year header rows it is laid out on.
+    /// </summary>
+    /// <param name="workbook">The workbook holding the applied analysis.</param>
+    /// <returns>The narrowest year header row, in columns, or zero when the template lays out none.</returns>
+    /// <remarks>
+    /// The capacity is measured from the template rather than stated here, so widening the blocks of the analysis is a
+    /// change to the template alone.  Every year header row is a fixed block of cells that a spill of the projected
+    /// years fills, so the narrowest of them is the horizon the analysis can show: a sweep projecting further spills
+    /// past the end of that row and into whatever is beside it.  Rows anchored to a spill are left out of the
+    /// measurement, because they resize with the sweep and so state its length rather than the template's room for it.
+    /// </remarks>
+    private static int ReadYearColumnCapacity(Excel.Workbook workbook)
+    {
+        int capacity = 0;
+
+        foreach ((string name, string refersTo) in ExcelUtils.GetNameDefinitions(workbook))
+        {
+            if (name.StartsWith('_') || !IsYearRowName(name) || AnalysisTemplate.IsSpillAnchored(refersTo))
+            {
+                continue;
+            }
+
+            Excel.Range? range = null;
+            Excel.Range? columns = null;
+            try
+            {
+                range = ExcelUtils.GetNameRange(workbook, name);
+
+                if (range.Count < 2)
+                {
+                    // A single cell of that name is an input rather than a category axis.
+                    continue;
+                }
+
+                columns = range.Columns;
+
+                if (capacity == 0 || columns.Count < capacity)
+                {
+                    capacity = columns.Count;
+                }
+            }
+            finally
+            {
+                ExcelUtils.ReleaseComObject(columns);
+                ExcelUtils.ReleaseComObject(range);
+            }
+        }
+
+        return capacity;
+    }
+
+    /// <summary>
+    /// Reads the metric key the shortfall reconciliation is run against.
+    /// </summary>
+    /// <param name="workbook">The workbook holding the applied analysis.</param>
+    /// <returns>The key the template states, or the default when it states none.</returns>
+    private static string ReadShortfallMetricKey(Excel.Workbook workbook)
+    {
+        foreach ((string name, _) in ExcelUtils.GetNameDefinitions(workbook))
+        {
+            if (!string.Equals(name, AnalysisTemplate.ShortfallMetricKeyName, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            foreach (string key in ReadTexts(workbook, name))
+            {
+                if (key.Length > 0)
+                {
+                    return key;
+                }
+            }
+        }
+
+        return AnalysisTemplate.DefaultShortfallMetricKey;
+    }
+
+    /// <summary>
+    /// Indicates whether a defined name holds one metric key, or a column of them.
+    /// </summary>
+    /// <param name="name">The defined name.</param>
+    /// <returns>True when it does.</returns>
+    private static bool IsMetricKeyName(string name)
+    {
+        return name.EndsWith(AnalysisTemplate.MetricKeyNameSuffix, StringComparison.Ordinal)
+            || name.EndsWith(AnalysisTemplate.MetricKeyNameSuffix + "s", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Indicates whether a defined name is a year header row.
+    /// </summary>
+    /// <param name="name">The defined name.</param>
+    /// <returns>True when it is.</returns>
+    private static bool IsYearRowName(string name)
+    {
+        return name.EndsWith(AnalysisTemplate.YearRowNameSuffix, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -194,8 +299,7 @@ public sealed class AnalysisChecks
 
         foreach ((string name, _) in ExcelUtils.GetNameDefinitions(workbook))
         {
-            if (name.StartsWith('_') || !name.EndsWith("MetricKey", StringComparison.Ordinal)
-                && !name.EndsWith("MetricKeys", StringComparison.Ordinal))
+            if (name.StartsWith('_') || !IsMetricKeyName(name))
             {
                 continue;
             }
@@ -243,7 +347,7 @@ public sealed class AnalysisChecks
     {
         foreach ((string name, _) in ExcelUtils.GetNameDefinitions(workbook))
         {
-            if (name.StartsWith('_') || !name.EndsWith("Years", StringComparison.Ordinal))
+            if (name.StartsWith('_') || !IsYearRowName(name))
             {
                 continue;
             }
@@ -313,6 +417,7 @@ public sealed class AnalysisChecks
     /// trial slots.
     /// </summary>
     /// <param name="workbook">The workbook holding the applied analysis.</param>
+    /// <param name="worksheetNames">The worksheets that hold formulas.</param>
     /// <param name="failures">The list every failure is added to.</param>
     /// <returns>The number of cells holding the #N/A of a trial slot with no trial.</returns>
     /// <remarks>
@@ -320,20 +425,19 @@ public sealed class AnalysisChecks
     /// that the chart draws no line.  Every other error, and every cell whose value is a string beginning with an
     /// equals sign, is a formula that did not take.
     /// </remarks>
-    private static int CheckCellContents(Excel.Workbook workbook, List<string> failures)
+    private static int CheckCellContents(Excel.Workbook workbook, IReadOnlyList<string> worksheetNames,
+        List<string> failures)
     {
         int blankTrialSlots = 0;
+        Dictionary<string, HashSet<int>> trialRowsByWorksheet = ReadTrialRows(workbook);
 
-        foreach (string worksheetName in new[]
-                 {
-                     AnalysisTemplate.AnalysisWorksheet, AnalysisTemplate.CalculationWorksheet
-                 })
+        foreach (string worksheetName in worksheetNames)
         {
             Excel.Worksheet worksheet = ExcelUtils.GetWorksheet(workbook, worksheetName);
             try
             {
-                HashSet<int> trialRows = worksheetName == AnalysisTemplate.AnalysisWorksheet
-                    ? ReadTrialRows(workbook)
+                HashSet<int> trialRows = trialRowsByWorksheet.TryGetValue(worksheetName, out HashSet<int>? rows)
+                    ? rows
                     : [];
 
                 CellBlock block = CellBlock.Read(worksheet);
@@ -372,54 +476,132 @@ public sealed class AnalysisChecks
     }
 
     /// <summary>
-    /// Checks that no chart of the analysis covers the data below it.
+    /// Checks that no chart of the analysis covers a cell that holds something.
     /// </summary>
     /// <param name="workbook">The workbook holding the applied analysis.</param>
+    /// <param name="worksheetNames">The worksheets that hold formulas, which are the ones charts are drawn on.</param>
     /// <param name="failures">The list every failure is added to.</param>
     /// <remarks>
-    /// Every chart sits in a blank band of rows beneath the block it charts.  A chart taller than its band hides the
-    /// block below it, which is a defect a reader of the output cannot see around and cannot fix, since the output
-    /// holds no formulas to rebuild.
+    /// A chart that hides a block is a defect a reader of the output cannot see around and cannot fix, since the
+    /// output holds no formulas to rebuild.  What is checked is the overlap of two boxes in both directions rather
+    /// than the vertical clearance alone: a chart sits either in the blank band of rows beneath the block it charts or
+    /// in blank columns beside it, ex. the sleeve snapshot pies, and a check that measured rows alone would report
+    /// every chart of the second kind while passing a chart that covers a block to its left.
     /// </remarks>
-    private static void CheckChartClearance(Excel.Workbook workbook, List<string> failures)
+    private static void CheckChartClearance(Excel.Workbook workbook, IReadOnlyList<string> worksheetNames,
+        List<string> failures)
     {
-        Excel.Worksheet worksheet = ExcelUtils.GetWorksheet(workbook, AnalysisTemplate.AnalysisWorksheet);
-        try
+        foreach (string worksheetName in worksheetNames)
         {
-            CellBlock block = CellBlock.Read(worksheet);
-            int lastRow = block.FirstRow + block.RowCount - 1;
-
-            if (lastRow < 1)
+            Excel.Worksheet worksheet = ExcelUtils.GetWorksheet(workbook, worksheetName);
+            try
             {
-                return;
+                CheckChartClearance(worksheet, worksheetName, failures);
             }
-
-            double[] tops = ExcelUtils.GetRowTops(worksheet, lastRow);
-
-            foreach ((string name, double top, double height) in ExcelUtils.GetChartBoxes(worksheet))
+            finally
             {
-                for (int row = 1; row <= lastRow; row++)
-                {
-                    if (tops[row] < top || block.IsRowEmpty(row))
-                    {
-                        continue;
-                    }
+                ExcelUtils.ReleaseComObject(worksheet);
+            }
+        }
+    }
 
-                    if (top + height > tops[row])
-                    {
-                        failures.Add("The chart " + name + " ends " + Format(top + height) + " pt down the sheet and "
-                            + "row " + Format(row) + ", which holds data, begins at " + Format(tops[row])
-                            + " pt, so the chart covers it.");
-                    }
+    /// <summary>
+    /// Checks that no chart of one worksheet covers a cell that holds something.
+    /// </summary>
+    /// <param name="worksheet">The worksheet to check.</param>
+    /// <param name="worksheetName">The name of the worksheet, for the message.</param>
+    /// <param name="failures">The list every failure is added to.</param>
+    private static void CheckChartClearance(Excel.Worksheet worksheet, string worksheetName, List<string> failures)
+    {
+        IReadOnlyList<(string Name, double Left, double Top, double Width, double Height)> charts =
+            ExcelUtils.GetChartBoxes(worksheet);
+
+        if (charts.Count == 0)
+        {
+            return;
+        }
+
+        CellBlock block = CellBlock.Read(worksheet);
+        int lastRow = block.FirstRow + block.RowCount - 1;
+        int lastColumn = block.FirstColumn + block.ColumnCount - 1;
+
+        if (lastRow < 1 || lastColumn < 1)
+        {
+            return;
+        }
+
+        // Nothing below the lowest chart or right of the widest one can be covered by any of them, so that is as far
+        // as the sheet is measured.  A calculation worksheet is as long as the sweep, and measuring it row by row to
+        // the end would cost a call per simulation.
+        double[] tops = ExcelUtils.GetRowTops(worksheet, lastRow, charts.Max(chart => chart.Top + chart.Height));
+        double[] lefts = ExcelUtils.GetColumnLefts(worksheet, lastColumn,
+            charts.Max(chart => chart.Left + chart.Width));
+
+        lastRow = Math.Min(lastRow, tops.Length - 2);
+        lastColumn = Math.Min(lastColumn, lefts.Length - 2);
+
+        foreach ((string name, double left, double top, double width, double height) in charts)
+        {
+            for (int row = block.FirstRow; row <= lastRow; row++)
+            {
+                // A row whose band of points does not meet the chart's cannot hold a cell the chart covers, and the
+                // rows are in order, so the first row past the bottom of the chart ends the search.
+                if (tops[row + 1] <= top)
+                {
+                    continue;
+                }
+
+                if (tops[row] >= top + height)
+                {
+                    break;
+                }
+
+                int column = FirstCoveredColumn(block, lefts, row, left, left + width, lastColumn);
+
+                if (column > 0)
+                {
+                    failures.Add("The chart " + name + " covers " + worksheetName + "!"
+                        + CellBlock.Reference(row, column) + ", which holds data.  A chart belongs in the blank band "
+                        + "of rows beneath the block it charts, or in blank columns beside it.");
 
                     break;
                 }
             }
         }
-        finally
+    }
+
+    /// <summary>
+    /// Finds the first column of one row holding something that a chart's span across the sheet covers.
+    /// </summary>
+    /// <param name="block">The used cells of the worksheet.</param>
+    /// <param name="lefts">The left of each column, in points, indexed by one based column.</param>
+    /// <param name="row">The one based worksheet row to search.</param>
+    /// <param name="chartLeft">The left of the chart, in points.</param>
+    /// <param name="chartRight">The right of the chart, in points.</param>
+    /// <param name="lastColumn">The last column of the block.</param>
+    /// <returns>The one based column, or zero when the chart covers nothing on that row.</returns>
+    private static int FirstCoveredColumn(CellBlock block, double[] lefts, int row, double chartLeft,
+        double chartRight, int lastColumn)
+    {
+        for (int column = block.FirstColumn; column <= lastColumn; column++)
         {
-            ExcelUtils.ReleaseComObject(worksheet);
+            if (lefts[column + 1] <= chartLeft)
+            {
+                continue;
+            }
+
+            if (lefts[column] >= chartRight)
+            {
+                break;
+            }
+
+            if (!block.IsCellEmpty(row, column))
+            {
+                return column;
+            }
         }
+
+        return 0;
     }
 
     /// <summary>
@@ -445,7 +627,7 @@ public sealed class AnalysisChecks
 
         if (blocks.ShortfallFirstColumn < 1)
         {
-            failures.Add("The results carry no " + AnalysisTemplate.ShortfallMetricKey + " columns, so the count of "
+            failures.Add("The results carry no " + blocks.ShortfallMetricKey + " columns, so the count of "
                 + "simulations that failed to fund the floor cannot be reconciled.  The harvest is required to record "
                 + "it: the funding ratio alone cannot tell a cut to the floor from a failure to reach it.");
 
@@ -496,7 +678,7 @@ public sealed class AnalysisChecks
         if (reported < beyondTolerance || reported > any)
         {
             failures.Add(AnalysisTemplate.BelowFloorCountName + " is " + Format(reported) + " and the "
-                + AnalysisTemplate.ShortfallMetricKey + " columns of the results report a shortfall in "
+                + blocks.ShortfallMetricKey + " columns of the results report a shortfall in "
                 + Format(beyondTolerance) + " to " + Format(any) + " simulations, so the two do not describe the same "
                 + "sweep.");
         }
@@ -508,27 +690,46 @@ public sealed class AnalysisChecks
     /// Reads the rows the blocks of individual trials occupy, which are the only rows allowed to hold #N/A.
     /// </summary>
     /// <param name="workbook">The workbook holding the applied analysis.</param>
-    /// <returns>The one based rows.</returns>
-    private static HashSet<int> ReadTrialRows(Excel.Workbook workbook)
+    /// <returns>The one based rows of each worksheet that carries a trial block.</returns>
+    /// <remarks>
+    /// The blocks are found through the defined names that carry the trial block marker rather than listed by name,
+    /// so a trial block added to the template is recognized without this tool being told about it.
+    /// </remarks>
+    private static Dictionary<string, HashSet<int>> ReadTrialRows(Excel.Workbook workbook)
     {
-        var rows = new HashSet<int>();
+        var rows = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
 
-        foreach (string name in AnalysisTemplate.TrialBlockNames)
+        foreach ((string name, _) in ExcelUtils.GetNameDefinitions(workbook))
         {
+            if (name.StartsWith('_')
+                || !name.Contains(AnalysisTemplate.TrialBlockNameMarker, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
             Excel.Range? range = null;
             Excel.Range? lines = null;
+            Excel.Worksheet? worksheet = null;
             try
             {
                 range = ExcelUtils.GetNameRange(workbook, name);
                 lines = range.Rows;
+                worksheet = (Excel.Worksheet)range.Worksheet;
+
+                if (!rows.TryGetValue(worksheet.Name, out HashSet<int>? worksheetRows))
+                {
+                    worksheetRows = [];
+                    rows.Add(worksheet.Name, worksheetRows);
+                }
 
                 for (int row = range.Row; row < range.Row + lines.Count; row++)
                 {
-                    rows.Add(row);
+                    worksheetRows.Add(row);
                 }
             }
             finally
             {
+                ExcelUtils.ReleaseComObject(worksheet);
                 ExcelUtils.ReleaseComObject(lines);
                 ExcelUtils.ReleaseComObject(range);
             }
@@ -577,16 +778,6 @@ public sealed class AnalysisChecks
     {
         return value.ToString(CultureInfo.InvariantCulture);
     }
-
-    /// <summary>
-    /// Formats a measurement in points for a message.
-    /// </summary>
-    /// <param name="value">The value to format.</param>
-    /// <returns>The formatted value.</returns>
-    private static string Format(double value)
-    {
-        return value.ToString("F0", CultureInfo.InvariantCulture);
-    }
 }
 
 /// <summary>
@@ -600,11 +791,12 @@ public sealed class AnalysisChecks
 internal sealed class MetricBlocks
 {
     private MetricBlocks(HashSet<string> headings, IReadOnlyList<int> years, int identityColumnCount,
-        int shortfallFirstColumn, int shortfallLastColumn)
+        string shortfallMetricKey, int shortfallFirstColumn, int shortfallLastColumn)
     {
         Headings = headings;
         Years = years;
         IdentityColumnCount = identityColumnCount;
+        ShortfallMetricKey = shortfallMetricKey;
         ShortfallFirstColumn = shortfallFirstColumn;
         ShortfallLastColumn = shortfallLastColumn;
     }
@@ -615,8 +807,14 @@ internal sealed class MetricBlocks
     internal HashSet<string> Headings { get; }
 
     /// <summary>
-    /// Gets the projected years, ascending, as the horizon metric's block states them.
+    /// Gets the projected years, ascending and without repetition, as every metric block of the results states them
+    /// between them.
     /// </summary>
+    /// <remarks>
+    /// The years are read off the headings as a whole rather than off one metric named here, so which metric the
+    /// template counts its horizon from is the template's business.  Every metric of a harvest carries the same block
+    /// of years, so taking them together says what taking any one of them would.
+    /// </remarks>
     internal IReadOnlyList<int> Years { get; }
 
     /// <summary>
@@ -624,6 +822,11 @@ internal sealed class MetricBlocks
     /// establish it.
     /// </summary>
     internal int IdentityColumnCount { get; }
+
+    /// <summary>
+    /// Gets the metric key the shortfall reconciliation was located by.
+    /// </summary>
+    internal string ShortfallMetricKey { get; }
 
     /// <summary>
     /// Gets the one based first column of the shortfall metric's block, or zero when the results carry none.
@@ -639,12 +842,13 @@ internal sealed class MetricBlocks
     /// Reads what the column headings of a sweep's results say about the metrics they carry.
     /// </summary>
     /// <param name="header">The column headings, in column order.</param>
+    /// <param name="shortfallMetricKey">The metric key the shortfall reconciliation is run against.</param>
     /// <param name="failures">The list a heading contract failure is added to.</param>
     /// <returns>The metric blocks.</returns>
-    internal static MetricBlocks Read(IReadOnlyList<string> header, List<string> failures)
+    internal static MetricBlocks Read(IReadOnlyList<string> header, string shortfallMetricKey, List<string> failures)
     {
         var headings = new HashSet<string>(header, StringComparer.Ordinal);
-        var years = new List<int>();
+        var years = new SortedSet<int>();
         int identityColumnCount = -1;
         int shortfallFirst = 0;
         int shortfallLast = 0;
@@ -667,12 +871,9 @@ internal sealed class MetricBlocks
                 identityColumnCount = column;
             }
 
-            if (string.Equals(key, AnalysisTemplate.HorizonMetricKey, StringComparison.Ordinal))
-            {
-                years.Add(year);
-            }
+            years.Add(year);
 
-            if (string.Equals(key, AnalysisTemplate.ShortfallMetricKey, StringComparison.Ordinal))
+            if (string.Equals(key, shortfallMetricKey, StringComparison.Ordinal))
             {
                 shortfallFirst = shortfallFirst == 0 ? column + 1 : shortfallFirst;
                 shortfallLast = column + 1;
@@ -681,19 +882,18 @@ internal sealed class MetricBlocks
 
         if (years.Count == 0)
         {
-            failures.Add("The results carry no " + AnalysisTemplate.HorizonMetricKey + " columns, which is what the "
-                + "analysis counts the projected years off.");
+            failures.Add("The results carry no column named MetricKey_YYYY, which is what the analysis reads the "
+                + "projected years off.");
         }
 
         if (shortfallLast - shortfallFirst + 1 != years.Count && shortfallFirst > 0)
         {
-            failures.Add("The " + AnalysisTemplate.ShortfallMetricKey + " columns of the results are not one "
-                + "contiguous block of the projected years.");
+            failures.Add("The " + shortfallMetricKey + " columns of the results are not one contiguous block of the "
+                + "projected years.");
         }
 
-        years.Sort();
-
-        return new MetricBlocks(headings, years, identityColumnCount, shortfallFirst, shortfallLast);
+        return new MetricBlocks(headings, [.. years], identityColumnCount, shortfallMetricKey, shortfallFirst,
+            shortfallLast);
     }
 }
 
@@ -771,28 +971,22 @@ internal sealed class CellBlock
     }
 
     /// <summary>
-    /// Indicates whether a row of the worksheet holds nothing within the block.
+    /// Indicates whether one cell of the worksheet holds nothing.
     /// </summary>
     /// <param name="row">The one based worksheet row.</param>
-    /// <returns>True when the row holds nothing, or lies outside the block.</returns>
-    internal bool IsRowEmpty(int row)
+    /// <param name="column">The one based worksheet column.</param>
+    /// <returns>True when the cell holds nothing, or lies outside the block.</returns>
+    internal bool IsCellEmpty(int row, int column)
     {
-        int index = row - FirstRow;
+        int rowIndex = row - FirstRow;
+        int columnIndex = column - FirstColumn;
 
-        if (index < 0 || index >= RowCount)
+        if (rowIndex < 0 || rowIndex >= RowCount || columnIndex < 0 || columnIndex >= ColumnCount)
         {
             return true;
         }
 
-        for (int column = 0; column < ColumnCount; column++)
-        {
-            if (Values[index, column] is not null)
-            {
-                return false;
-            }
-        }
-
-        return true;
+        return Values[rowIndex, columnIndex] is null;
     }
 
     /// <summary>
@@ -803,7 +997,18 @@ internal sealed class CellBlock
     /// <returns>The address, ex. AP118.</returns>
     internal string AddressOf(int row, int column)
     {
-        return ColumnLetters(FirstColumn + column) + (FirstRow + row).ToString(CultureInfo.InvariantCulture);
+        return Reference(FirstRow + row, FirstColumn + column);
+    }
+
+    /// <summary>
+    /// Describes a cell of a worksheet in A1 notation.
+    /// </summary>
+    /// <param name="row">The one based worksheet row.</param>
+    /// <param name="column">The one based worksheet column.</param>
+    /// <returns>The address, ex. AP118.</returns>
+    internal static string Reference(int row, int column)
+    {
+        return ColumnLetters(column) + row.ToString(CultureInfo.InvariantCulture);
     }
 
     /// <summary>

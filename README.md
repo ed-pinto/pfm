@@ -1,6 +1,19 @@
 # pfm Readme
 pfm is a command line interface for performing operations against the PortfolioManager Excel workbook.
 
+## Building
+
+Build with MSBuild, not with `dotnet build`:
+
+```
+& "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" pfm.sln
+```
+
+`dotnet build` fails on this project with `MSB4803: The task "ResolveComReference" is not supported on the .NET Core
+version of MSBuild`. pfm drives Excel through `COMReference` items with `WrapperTool=tlbimp`, and generating the interop
+assemblies from a type library is a .NET Framework task, which the SDK's own MSBuild does not carry. Building from
+Visual Studio does the same thing as the line above.
+
 ## iterate
 
 Iterates the workbook's materialized series until each agrees with the live value it stands for. It works on the
@@ -68,6 +81,7 @@ be sorted, filtered and compared column by column:
 | --- | --- |
 | `RunConfiguration.Expenditures.csv` | `Expenditures` on `52_Expenditures` |
 | `RunConfiguration.TargetNetIncomeEras.csv` | `TargetNetIncomeEras` on `51_Targets` |
+| `RunConfiguration.MaxDisposalEras.csv` | `MaxDisposalEras` on `51_Targets` |
 | `RunConfiguration.AllocationTargets.csv` | `AllocationTargets` on `13_Allocations` |
 | `RunConfiguration.AllocationFloors.csv` | `AllocationFloors` on `13_Allocations` |
 | `RunConfiguration.DirectedDraws.csv` | `DirectedDraws` on `13_Allocations` |
@@ -78,9 +92,9 @@ the plan left empty is written as its heading row alone, which is what distingui
 a sweep whose configuration was never recorded.
 
 `Parameters` is the same idea for the scalar parameters, which `10_Parameters` states as defined names rather than as a
-table: `CdnResidencyYear`, `YearlyMaxDisposal`, `EquityGainsRebalanceThreshold`, `ConsumptionStressStart`,
-`ConsumptionStressFull`, `BootstrapBlockYears` and `BootstrapMatchPool`. A name the workbook does not define fails the
-run rather than being recorded empty, so a sweep that takes hours cannot leave an incomplete record of what it ran.
+table: `CdnResidencyYear`, `EquityGainsRebalanceThreshold`, `ConsumptionStressStart`, `ConsumptionStressFull`,
+`BootstrapBlockYears` and `BootstrapMatchPool`. A name the workbook does not define fails the run rather
+than being recorded empty, so a sweep that takes hours cannot leave an incomplete record of what it ran.
 
 The files are written the way the results are, and read back the same way: the invariant culture throughout, `TRUE` or
 `FALSE` for a flag, and an empty field for an empty cell. A line break inside a cell, ex. a note typed with `Alt+Enter`,
@@ -283,9 +297,15 @@ would be read through the last one's geometry with nothing reported. For the sam
 values into the cells of the table rather than pasted over it, and the heading row is written on its own: a single write
 covering a table's whole block, heading row included, replaces the table the way a paste does.
 
+Resizing rather than replacing is also why the template has to carry a table of its own for every configuration table
+the sweep records: there is nothing to resize otherwise, and the run is failed by name rather than analysed against a
+plan the workbook does not state. Adding a table to `RunConfiguration.TableSources` is therefore a change to the
+template as well, ex. `MaxDisposalEras`, which the sweep began recording as an era schedule where the plan had stated
+one `YearlyMaxDisposal` scalar.
+
 ### The output workbook
 
-Four worksheets, all values: `RunConfiguration`, `SimData`, `SimAnalysisCalc` and `SimAnalysis`. Nothing in it can
+All values, and required to hold `RunConfiguration`, `SimData`, `SimAnalysisCalc` and `SimAnalysis`. Nothing in it can
 recalculate, which is the point of it: the inputs of the analysis were decided in the template, and a question about how
 a figure was derived is answered by opening the template rather than by editing the output.
 
@@ -294,9 +314,10 @@ can still be filtered through, the `#N/A` of a trial slot with no trial to plot,
 because every series reads a range that still holds the same values. What does not survive is the names anchored to a
 spill, which refer to nothing once the spill is a block of values.
 
-`SimAnalysis` and `SimAnalysisCalc` are flattened in that order. The names the analysis is built on are anchored to the
-spills on the calculation sheet, so flattening the calculation sheet first would leave every figure that reads one of
-those names saved as `#REF!`.
+Every worksheet of the template but the two data worksheets and `AnalysisSpec` is flattened, so a presentation sheet
+added to the template is carried into the output without a change here. `SimAnalysisCalc` is flattened last: the names
+the analysis is built on are anchored to the spills on the calculation sheet, so flattening it first would leave every
+figure that reads one of those names saved as `#REF!`.
 
 An analysis re-applied to a sweep already analysed resolves to the name already taken, and the workbook that is there is
 reported rather than replaced, as `coalesce` does with its own output. Which version of the analysis produced a workbook
@@ -311,10 +332,32 @@ than one line at a time. They are the validation list of the `AnalysisSpec` work
 | --- | --- |
 | Every metric key the analysis states resolves to a block of `<MetricKey>_<YYYY>` columns the results carry | A harvest that renamed or dropped a metric. This is the one check that fails on a dataset the template cannot analyse at all, and it names the metric and the column it could not find |
 | `SimulationCount` equals the rows written; `ProjectionYearCount` and `FirstProjectionYear` agree with the headers | A table that does not cover the sweep, ex. one left at the previous sweep's geometry |
-| The sweep projects at most 39 years | A horizon the analysis has no room for. The blocks occupy `B:AN`, so a longer one is a change to the template rather than a dataset it can be applied to |
+| The sweep projects no more years than the narrowest year header row of the template is wide | A horizon the analysis has no room for. The width is measured off the template rather than stated here, so widening the blocks past `B:AN` is a change to the template alone |
 | A simulation is identified by at most 5 columns | A sweep whose per-simulation diagnostics would reach into the block beside them. A back test identifies a simulation by three columns and a Monte Carlo campaign by two, and each diagnostic on the calculation sheet is one column wider than that. Excel reports the collision as `#SPILL!` on one cell and says nothing about the sweep that provoked it |
 | No defined name refers to anything bracketed | A name carried in from another workbook, which resolves against whatever copy of that file is open and reads the wrong sweep without saying so |
 | No cell holds an error other than the `#N/A` of a blank trial slot, and no cell's value is a string beginning with `=` | A formula that did not take |
-| Every year header row holds 39 years rather than one | A year header row formatted as text before its formula was written, which spills nothing and fails silently while the chart above it still renders |
-| No chart's bottom edge passes the top of the next non-blank row | A chart covering the block below it, which a reader of a workbook with no formulas cannot fix |
+| Every year header row holds as many years as the sweep projects rather than one | A year header row formatted as text before its formula was written, which spills nothing and fails silently while the chart above it still renders |
+| No chart's box overlaps a cell that holds something | A chart covering a block, which a reader of a workbook with no formulas cannot fix. Both directions are measured, so a chart in the blank band below its block and one in blank columns beside it, ex. the sleeve snapshot pies, both pass |
 | The count of simulations that fell below the income floor is bracketed by what the `IncomeShortfall` columns report | An analysis reading the wrong columns. This is the one check that reads the results themselves rather than what the analysis says about them |
+
+### What a template change costs
+
+The checks are written so that editing the analysis is a change to the template alone. What the tool measures from the
+template, and therefore what it follows without an edit here:
+
+| The tool reads | From | So the template may |
+| --- | --- | --- |
+| Which metrics the analysis is reading | Every defined name ending `MetricKey` or `MetricKeys` | Gain, drop or rename a metric block |
+| The projected years and the first of them | The `<MetricKey>_<YYYY>` headings of the sweep | Count its horizon off whichever metric it likes |
+| How many year columns there is room for | The narrowest defined name ending `Years` that is not anchored to a spill | Widen its blocks past `B:AN` |
+| Which cells may hold `#N/A` | Every defined name containing `Trace` | Add a block of individual trials |
+| Which worksheets to flatten | Every worksheet but `RunConfiguration`, `SimData` and `AnalysisSpec` | Gain a presentation sheet |
+| Where the charts may sit | The used cells of each flattened worksheet | Place a chart below its block or beside it |
+| Which metric carries the shortfall | A defined name `ShortfallMetricKey`, or `IncomeShortfall` when the template states none | Rename the metric |
+
+Two things are still stated here rather than measured, and changing either needs an edit to the tool as well:
+
+- The five identity columns a simulation may be described by. That ceiling is the gap between two spills on
+  `SimAnalysisCalc`, which the workbook states nowhere a reader could find; see note 39 of `AnalysisSpec`.
+- The four worksheets the output is required to hold, which are the two the transplant writes and the two the checks
+  read.

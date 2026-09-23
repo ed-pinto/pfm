@@ -1,4 +1,4 @@
-using System.Diagnostics.CodeAnalysis;
+﻿using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using Serilog;
@@ -944,7 +944,8 @@ public static class Operations
     }
 
     /// <summary>
-    /// Settles the materialized series of one simulation, retrying with damping when they do not converge.
+    /// Settles the materialized series of one simulation, retrying with progressively heavier damping when they do
+    /// not converge.
     /// </summary>
     /// <param name="iterator">The iterator that settles the series.</param>
     /// <param name="plan">The sweep being run, which names the tag its log messages carry.</param>
@@ -956,6 +957,16 @@ public static class Operations
     /// every simulation of a sweep does.  A retry damps instead, which settles the oscillation between two values that
     /// is what an undamped attempt cannot leave, at the cost of the extra passes that are why the first attempt does
     /// not pay for it.
+    /// <para>
+    /// Each retry halves the gain of the one before it, so the retries run at
+    /// <see cref="ConvergenceIterator.DampedGain"/> and then at a half and a quarter of it.  A retry that repeated the
+    /// gain of the attempt that just failed would be the same run from a slightly different starting point, which is
+    /// no run at all on a simulation whose feedback is too strong for that gain: the gain is what decides whether the
+    /// iteration contracts, and the only way a retry can
+    /// settle what its predecessor could not is by contracting harder.  Halving widens the range of feedback the
+    /// iteration tolerates on every retry, which is what the occasional simulation that damping alone does not settle
+    /// needs, and it costs nothing on the simulations that never reach a retry at all.
+    /// </para>
     /// <para>
     /// A retry starts from wherever the failed attempt left the series rather than from reset ones.  A damped pass
     /// converges on the same fixed point from any starting value, and the one the failed attempt reached is no worse a
@@ -970,16 +981,30 @@ public static class Operations
 
         for (int retry = 1; retry <= MaxRetries && outcome.Status != ConvergenceStatus.Converged; retry++)
         {
+            double gain = RetryGain(retry);
+
             Log.Logger.Warning("PFM_" + plan.LogName + "_RETRY: " + label + " retry=" + Format(retry) + " of "
-                + Format(MaxRetries) + " " + DescribeFailure(outcome));
+                + Format(MaxRetries) + " gain=" + FormatGain(gain) + " " + DescribeFailure(outcome));
 
-            output.WriteLine("Retrying " + label + " with damping (" + Format(retry) + " of " + Format(MaxRetries)
-                + "): the workbook did not converge in " + Format(outcome.Passes) + " passes.");
+            output.WriteLine("Retrying " + label + " with damping at a gain of " + FormatGain(gain) + " ("
+                + Format(retry) + " of " + Format(MaxRetries) + "): the workbook did not converge in "
+                + Format(outcome.Passes) + " passes.");
 
-            outcome = iterator.Run(label + " retry " + Format(retry), ConvergenceIterator.DampedGain);
+            outcome = iterator.Run(label + " retry " + Format(retry), gain);
         }
 
         return outcome;
+    }
+
+    /// <summary>
+    /// Yields the gain one retry of <see cref="Settle"/> runs at: the damped gain, halved once more for every retry
+    /// that has already failed.
+    /// </summary>
+    /// <param name="retry">The one based number of the retry about to run.</param>
+    /// <returns>The fraction of the difference between a live and a materialized column a pass writes.</returns>
+    private static double RetryGain(int retry)
+    {
+        return ConvergenceIterator.DampedGain / Math.Pow(2, retry - 1);
     }
 
     /// <summary>
@@ -1213,5 +1238,19 @@ public static class Operations
     private static string Format(double value)
     {
         return value.ToString("F2", CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Formats a convergence gain for a log or console message.
+    /// </summary>
+    /// <param name="value">The value to format.</param>
+    /// <returns>The formatted value.</returns>
+    /// <remarks>
+    /// A gain is a small fraction that halves on every retry, so it is written with enough places to tell one retry
+    /// from the next rather than with the two a dollar amount is written with.
+    /// </remarks>
+    private static string FormatGain(double value)
+    {
+        return value.ToString("0.######", CultureInfo.InvariantCulture);
     }
 }

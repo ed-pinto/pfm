@@ -49,22 +49,69 @@ public static class AnalysisTemplate
     public const string SpecificationWorksheet = "AnalysisSpec";
 
     /// <summary>
-    /// The worksheets of the output workbook.
+    /// The worksheets the output workbook is required to hold.
     /// </summary>
-    public static readonly IReadOnlyList<string> OutputWorksheets =
+    /// <remarks>
+    /// These are required rather than exhaustive: a presentation worksheet added to the template is flattened along
+    /// with the rest and carried into the output, so growing the analysis by a sheet is a change to the template
+    /// alone.  What is not optional is these four, because the transplant writes two of them and the checks read the
+    /// other two.
+    /// </remarks>
+    public static readonly IReadOnlyList<string> RequiredWorksheets =
         [RunConfigurationWorksheet, SimDataWorksheet, CalculationWorksheet, AnalysisWorksheet];
 
     /// <summary>
-    /// The worksheets that hold formulas, in the order they are flattened to values.
+    /// The worksheets that hold no formula and are therefore never flattened.
     /// </summary>
     /// <remarks>
-    /// The analysis is flattened before the calculations behind it, because it is what reads them: the names the charts
-    /// and tables of the analysis are built on are anchored to the spills on the calculation sheet, and a name anchored
-    /// to a spill refers to nothing once that spill is a block of values.  Flattened the other way round, every figure
-    /// on the analysis that reads one of those names is saved as #REF!.  The two data worksheets are not flattened at
-    /// all: they hold no formula, and the tables defined over them would not survive the paste.
+    /// These two are the sweep as it was written, and the tables defined over them would not survive the paste that
+    /// flattening is.  Every other worksheet of the template holds formulas and is flattened.
     /// </remarks>
-    public static readonly IReadOnlyList<string> FlattenedWorksheets = [AnalysisWorksheet, CalculationWorksheet];
+    public static readonly IReadOnlyList<string> DataWorksheets = [RunConfigurationWorksheet, SimDataWorksheet];
+
+    /// <summary>
+    /// Indicates whether what a defined name refers to is anchored to a spill.
+    /// </summary>
+    /// <param name="refersTo">What the name refers to, as Excel states it.</param>
+    /// <returns>True when it is.</returns>
+    /// <remarks>
+    /// Excel states a spill anchored name either way, ex. =SimAnalysisCalc!$B$2# through the object model and
+    /// ANCHORARRAY in the file it saves, so both are recognized.  A name anchored to a spill resizes with the sweep,
+    /// which is why the flatten drops it and why the checks do not measure the template against it.
+    /// </remarks>
+    public static bool IsSpillAnchored(string refersTo)
+    {
+        ArgumentNullException.ThrowIfNull(refersTo);
+
+        return refersTo.EndsWith('#') || refersTo.Contains("ANCHORARRAY", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Orders the worksheets that hold formulas as they are flattened to values.
+    /// </summary>
+    /// <param name="worksheetNames">The worksheets of the workbook, in the order it holds them.</param>
+    /// <returns>The worksheets to flatten, in the order they are flattened.</returns>
+    /// <remarks>
+    /// The calculation worksheet is flattened last, because it is the one every other sheet reads: the names the
+    /// charts and tables of the analysis are built on are anchored to the spills it carries, and a name anchored to a
+    /// spill refers to nothing once that spill is a block of values.  Flattened the other way round, every figure that
+    /// reads one of those names is saved as #REF!.  The data worksheets are left alone, and so is the design record,
+    /// which is removed rather than flattened.
+    /// </remarks>
+    public static IReadOnlyList<string> FlattenedWorksheetsOf(IReadOnlyList<string> worksheetNames)
+    {
+        ArgumentNullException.ThrowIfNull(worksheetNames);
+
+        var flattened = worksheetNames
+            .Where(name => !DataWorksheets.Contains(name, StringComparer.Ordinal)
+                && !string.Equals(name, SpecificationWorksheet, StringComparison.Ordinal)
+                && !string.Equals(name, CalculationWorksheet, StringComparison.Ordinal))
+            .ToList();
+
+        flattened.Add(CalculationWorksheet);
+
+        return flattened;
+    }
 
     /// <summary>
     /// The worksheet names a sweep's results may be found under in the workbook they are read from.  A sweep coalesced
@@ -112,29 +159,42 @@ public static class AnalysisTemplate
     public const string BelowFloorCountName = "SimulationsBelowFloor";
 
     /// <summary>
-    /// The defined names of the two blocks of individual trials, which are the only cells of the analysis allowed to
-    /// hold an error: a trial slot with no trial to plot returns #N/A so that the chart draws no line.
+    /// What a defined name holds to mark a block of individual trials, which are the only cells of the analysis
+    /// allowed to hold an error: a trial slot with no trial to plot returns #N/A so that the chart draws no line.
     /// </summary>
-    public static readonly IReadOnlyList<string> TrialBlockNames = ["ThrottleTraceSingleYear", "ThrottleTraceWindow"];
+    /// <remarks>
+    /// The blocks are recognized by their names rather than listed here, so a trial block added to the template needs
+    /// no change to this tool.  ThrottleTraceSingleYear and ThrottleTraceWindow are what the template names today.
+    /// </remarks>
+    public const string TrialBlockNameMarker = "Trace";
 
     /// <summary>
-    /// The metric whose year columns are counted to establish the horizon, and whose first column names the first
-    /// projected year.
+    /// The suffix a defined name carries when it holds one metric key, or a column of them.
     /// </summary>
-    public const string HorizonMetricKey = "PortfolioConsumedRatio";
+    public const string MetricKeyNameSuffix = "MetricKey";
 
     /// <summary>
-    /// The metric carrying the shortfall of one simulated year against the income floor, which the guardrail block's
-    /// count of failed simulations is reconciled against.
+    /// The suffix a defined name carries when it is a year header row.
     /// </summary>
-    public const string ShortfallMetricKey = "IncomeShortfall";
+    public const string YearRowNameSuffix = "Years";
 
     /// <summary>
-    /// The greatest number of year columns the analysis has room for.  The blocks of the analysis occupy B:AN and the
-    /// fan plumbing behind the charts is the same width, so a sweep projecting further than this is a change to the
-    /// template rather than a dataset it can be applied to.
+    /// The defined name the template may use to state the metric carrying the shortfall of one simulated year against
+    /// the income floor, which the guardrail block's count of failed simulations is reconciled against.
     /// </summary>
-    public const int MaxYearColumns = 39;
+    /// <remarks>
+    /// A template that defines this name states the metric itself; one that does not is read as carrying
+    /// <see cref="DefaultShortfallMetricKey"/>, which is what the template names today.  The reconciliation is the one
+    /// check that reads the results rather than what the analysis says about them, so it has to name a metric; where
+    /// that name comes from is the template's business.
+    /// </remarks>
+    public const string ShortfallMetricKeyName = "ShortfallMetricKey";
+
+    /// <summary>
+    /// The metric carrying the shortfall of one simulated year against the income floor, when the template does not
+    /// name one through <see cref="ShortfallMetricKeyName"/>.
+    /// </summary>
+    public const string DefaultShortfallMetricKey = "IncomeShortfall";
 
     /// <summary>
     /// The greatest number of leading identity columns the analysis has room for.
@@ -146,6 +206,11 @@ public static class AnalysisTemplate
     /// blocks is a column wider for it.  The narrowest allowance on that sheet is six columns, and a sweep that passes
     /// it spills into the block beside it, which Excel reports as #SPILL! on one cell and not as anything about the
     /// sweep.  Checking it here is what turns that into a sentence.
+    ///
+    /// This is the one capacity of the template that is stated here rather than measured from it: the gap between two
+    /// spills on the calculation sheet is not something the workbook states anywhere a reader could find, so
+    /// rearranging that sheet is the one template change that needs a change here as well.  The room for year columns
+    /// is measured off the year header rows instead; see <see cref="AnalysisChecks"/>.
     /// </remarks>
     public const int MaxIdentityColumns = 5;
 }
@@ -447,7 +512,10 @@ public sealed class AnalysisTransplant
     /// </remarks>
     private void Flatten()
     {
-        foreach (string worksheetName in AnalysisTemplate.FlattenedWorksheets)
+        IReadOnlyList<string> flattened =
+            AnalysisTemplate.FlattenedWorksheetsOf(ExcelUtils.GetWorksheetNames(_session.Workbook));
+
+        foreach (string worksheetName in flattened)
         {
             Excel.Worksheet worksheet = ExcelUtils.GetWorksheet(_session.Workbook, worksheetName);
             try
@@ -463,10 +531,7 @@ public sealed class AnalysisTransplant
         int dropped = 0;
         foreach ((string name, string refersTo) in ExcelUtils.GetNameDefinitions(_session.Workbook))
         {
-            // Excel states a spill anchored name either way, ex. =SimAnalysisCalc!$B$2# through the object model and
-            // ANCHORARRAY in the file it saves, so both are recognized.
-            bool spillAnchored = refersTo.EndsWith('#')
-                || refersTo.Contains("ANCHORARRAY", StringComparison.OrdinalIgnoreCase);
+            bool spillAnchored = AnalysisTemplate.IsSpillAnchored(refersTo);
             bool onSpecification = refersTo.Contains(AnalysisTemplate.SpecificationWorksheet + "!",
                 StringComparison.OrdinalIgnoreCase);
 
@@ -483,39 +548,44 @@ public sealed class AnalysisTransplant
 
         CheckOutputWorksheets();
 
-        _output.WriteLine("Flattened " + string.Join(" and ", AnalysisTemplate.FlattenedWorksheets)
+        _output.WriteLine("Flattened " + string.Join(" and ", flattened)
             + " to values, dropped " + Format(dropped) + " defined names that a flattened workbook cannot hold, and "
             + "removed " + AnalysisTemplate.SpecificationWorksheet + ".");
     }
 
     /// <summary>
-    /// Checks that what is left is the workbook the output is meant to be: the four worksheets, and nothing else.
+    /// Checks that what is left is the workbook the output is meant to be: the worksheets the analysis is made of, and
+    /// no design record.
     /// </summary>
-    /// <exception cref="InvalidOperationException">The workbook holds a worksheet the output does not.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The workbook is missing a worksheet the output is required to hold, or still holds the design record.
+    /// </exception>
     /// <remarks>
-    /// A sheet the template carried beyond these is not flattened, because nothing says what it holds or what it reads.
-    /// It would therefore ship live formulas in a workbook of values, against a specification sheet that has been
-    /// removed and names that have been dropped, which is to say as a block of #REF!.  A template that has grown a sheet
-    /// is a change to what the output is, so it is reported rather than carried.
+    /// A worksheet the template carries beyond the required four is flattened along with the rest and carried into the
+    /// output, so this states what has to be there rather than what may be: growing the analysis by a presentation
+    /// sheet is a change to the template alone.  What is checked is that the flatten reached everything, because a
+    /// sheet that kept its formulas would ship them in a workbook of values, against a design record that has been
+    /// removed and names that have been dropped, which is to say as a block of #REF!.
     /// </remarks>
     private void CheckOutputWorksheets()
     {
         IReadOnlyList<string> found = ExcelUtils.GetWorksheetNames(_session.Workbook);
 
-        var unexpected = found.Except(AnalysisTemplate.OutputWorksheets, StringComparer.Ordinal).ToList();
-        var missing = AnalysisTemplate.OutputWorksheets.Except(found, StringComparer.Ordinal).ToList();
+        var missing = AnalysisTemplate.RequiredWorksheets.Except(found, StringComparer.Ordinal).ToList();
+        bool specificationRemains = found.Contains(AnalysisTemplate.SpecificationWorksheet, StringComparer.Ordinal);
 
-        if (unexpected.Count == 0 && missing.Count == 0)
+        if (missing.Count == 0 && !specificationRemains)
         {
             return;
         }
 
         throw new InvalidOperationException("The analysis of this sweep holds "
-            + (unexpected.Count > 0 ? "the unexpected worksheet " + string.Join(", ", unexpected) : string.Empty)
-            + (unexpected.Count > 0 && missing.Count > 0 ? " and " : string.Empty)
             + (missing.Count > 0 ? "no worksheet " + string.Join(", ", missing) : string.Empty)
-            + ".  The output is " + string.Join(", ", AnalysisTemplate.OutputWorksheets)
-            + ", all values, and a worksheet beyond them would be carried with its formulas live.");
+            + (missing.Count > 0 && specificationRemains ? " and " : string.Empty)
+            + (specificationRemains ? "the design record " + AnalysisTemplate.SpecificationWorksheet + " still"
+                : string.Empty)
+            + ".  The output is required to hold " + string.Join(", ", AnalysisTemplate.RequiredWorksheets)
+            + ", all values, and to carry no design record.");
     }
 
     /// <summary>
