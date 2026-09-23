@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Runtime.InteropServices;
@@ -24,9 +24,17 @@ public static class ExcelUtils
     /// A session that owns the Excel and workbook references.  Disposing the session restores the Excel application
     /// settings it changed and, when the session started Excel, closes the workbook and quits.
     /// </returns>
+    /// <remarks>
+    /// The message filter is installed before Excel is reached rather than once a session holds it, because the calls
+    /// that start an instance and open a workbook are among the likeliest to be rejected: an Excel that is still
+    /// starting up, or still finishing with a workbook it has just opened, is busy.  See
+    /// <see cref="OleMessageFilter"/>.
+    /// </remarks>
     public static ExcelSession OpenWorkbook(string filePath)
     {
         ArgumentNullException.ThrowIfNull(filePath);
+
+        OleMessageFilter.Register();
 
         string fullPath = Path.GetFullPath(filePath);
 
@@ -72,10 +80,17 @@ public static class ExcelUtils
     /// running object table the way <see cref="OpenWorkbook"/> does.  Excel registers its class factory as single use,
     /// so each activation starts a fresh excel.exe; the resulting process is checked against the instances that were
     /// already running so that a violation of that assumption fails here rather than silently corrupting a sweep.
+    /// <para>
+    /// The message filter is installed first, before the instance is started: a sweep starts several Excels at once,
+    /// each opening a workbook large enough to keep it busy for seconds afterwards, which is exactly when a call is
+    /// rejected.  See <see cref="OleMessageFilter"/>.
+    /// </para>
     /// </remarks>
     public static ExcelSession StartIsolatedWorkbook(string filePath)
     {
         ArgumentNullException.ThrowIfNull(filePath);
+
+        OleMessageFilter.Register();
 
         string fullPath = Path.GetFullPath(filePath);
         HashSet<int> existing = GetExcelProcessIds();
@@ -127,9 +142,13 @@ public static class ExcelUtils
     /// added to whatever Excel the user happens to have open would appear in front of them, and the settings this
     /// session suspends would be theirs to have disturbed.  Asking for the one worksheet template rather than deleting
     /// the surplus sheets afterwards is what keeps the workbook's shape independent of the machine's Excel settings.
+    /// The message filter is installed before the instance is started, for the reason
+    /// <see cref="StartIsolatedWorkbook"/> states.
     /// </remarks>
     public static ExcelSession CreateWorkbook()
     {
+        OleMessageFilter.Register();
+
         HashSet<int> existing = GetExcelProcessIds();
 
         var excel = new Excel.Application
@@ -1688,23 +1707,29 @@ public static class ExcelUtils
     /// Reads the distance from the top of a worksheet to the top of each of its first rows, in points.
     /// </summary>
     /// <param name="worksheet">The worksheet to measure.</param>
-    /// <param name="rowCount">The number of rows to measure.</param>
+    /// <param name="rowCount">The greatest number of rows to measure.</param>
+    /// <param name="stopBeyond">
+    /// The point past which nothing is being asked about, ex. the bottom of the lowest chart on the sheet.  Measuring
+    /// stops at the first row starting at or beyond it.
+    /// </param>
     /// <returns>
-    /// The tops, indexed by one based row, so that index zero is unused and index rowCount + 1 holds the top of the
-    /// row after the last one measured.
+    /// The tops, indexed by one based row, so that index zero is unused and the last index holds the top of the row
+    /// after the last one measured.  The array is shorter than rowCount + 2 when measuring stopped early.
     /// </returns>
     /// <remarks>
     /// This is what a check on the placement of a chart is expressed in: a chart is positioned in points and the data
     /// it must not cover is positioned in rows, so one of the two has to be converted into the other's terms.  The
     /// heights are measured rather than assumed, because a row whose height was changed by hand would otherwise move
-    /// every row beneath it out from under the check.
+    /// every row beneath it out from under the check.  Each row costs a call, and a worksheet of spills is as long as
+    /// the sweep, so the bound is what keeps measuring a sheet proportional to the charts on it rather than to the
+    /// number of simulations.
     /// </remarks>
-    public static double[] GetRowTops(Excel.Worksheet worksheet, int rowCount)
+    public static double[] GetRowTops(Excel.Worksheet worksheet, int rowCount, double stopBeyond)
     {
         ArgumentNullException.ThrowIfNull(worksheet);
         ArgumentOutOfRangeException.ThrowIfLessThan(rowCount, 1);
 
-        var tops = new double[rowCount + 2];
+        var tops = new List<double>(rowCount + 2) { 0 };
 
         for (int row = 1; row <= rowCount + 1; row++)
         {
@@ -1712,15 +1737,67 @@ public static class ExcelUtils
             try
             {
                 cell = (Excel.Range)worksheet.Cells[row, 1];
-                tops[row] = (double)cell.Top;
+                tops.Add((double)cell.Top);
             }
             finally
             {
                 ReleaseComObject(cell);
             }
+
+            if (tops[row] >= stopBeyond)
+            {
+                break;
+            }
         }
 
-        return tops;
+        return [.. tops];
+    }
+
+    /// <summary>
+    /// Reads the distance from the left of a worksheet to the left of each of its first columns, in points.
+    /// </summary>
+    /// <param name="worksheet">The worksheet to measure.</param>
+    /// <param name="columnCount">The greatest number of columns to measure.</param>
+    /// <param name="stopBeyond">
+    /// The point past which nothing is being asked about, ex. the right edge of the widest chart on the sheet.
+    /// Measuring stops at the first column starting at or beyond it.
+    /// </param>
+    /// <returns>
+    /// The lefts, indexed by one based column, so that index zero is unused and the last index holds the left of the
+    /// column after the last one measured.  The array is shorter than columnCount + 2 when measuring stopped early.
+    /// </returns>
+    /// <remarks>
+    /// This is the companion of <see cref="GetRowTops"/>, and it is what lets a chart placed beside a block be told
+    /// from one placed over it.  A chart overlaps a cell only when the two boxes overlap in both directions, so a
+    /// check that measures rows alone reports every chart that merely sits to the right of its table.
+    /// </remarks>
+    public static double[] GetColumnLefts(Excel.Worksheet worksheet, int columnCount, double stopBeyond)
+    {
+        ArgumentNullException.ThrowIfNull(worksheet);
+        ArgumentOutOfRangeException.ThrowIfLessThan(columnCount, 1);
+
+        var lefts = new List<double>(columnCount + 2) { 0 };
+
+        for (int column = 1; column <= columnCount + 1; column++)
+        {
+            Excel.Range? cell = null;
+            try
+            {
+                cell = (Excel.Range)worksheet.Cells[1, column];
+                lefts.Add((double)cell.Left);
+            }
+            finally
+            {
+                ReleaseComObject(cell);
+            }
+
+            if (lefts[column] >= stopBeyond)
+            {
+                break;
+            }
+        }
+
+        return [.. lefts];
     }
 
     /// <summary>
@@ -1728,11 +1805,12 @@ public static class ExcelUtils
     /// </summary>
     /// <param name="worksheet">The worksheet whose charts are wanted.</param>
     /// <returns>The charts, in the order the worksheet holds them.</returns>
-    public static IReadOnlyList<(string Name, double Top, double Height)> GetChartBoxes(Excel.Worksheet worksheet)
+    public static IReadOnlyList<(string Name, double Left, double Top, double Width, double Height)> GetChartBoxes(
+        Excel.Worksheet worksheet)
     {
         ArgumentNullException.ThrowIfNull(worksheet);
 
-        var boxes = new List<(string, double, double)>();
+        var boxes = new List<(string, double, double, double, double)>();
 
         Excel.ChartObjects charts = (Excel.ChartObjects)worksheet.ChartObjects();
         try
@@ -1743,7 +1821,7 @@ public static class ExcelUtils
                 try
                 {
                     chart = (Excel.ChartObject)charts.Item(index);
-                    boxes.Add((chart.Name, chart.Top, chart.Height));
+                    boxes.Add((chart.Name, chart.Left, chart.Top, chart.Width, chart.Height));
                 }
                 finally
                 {
@@ -2175,8 +2253,6 @@ public sealed class ExcelSession : IDisposable
         _originalScreenUpdating = excel.ScreenUpdating;
         _originalEnableEvents = excel.EnableEvents;
         _originalDisplayAlerts = excel.DisplayAlerts;
-
-        OleMessageFilter.Register();
     }
 
     /// <summary>
@@ -2308,7 +2384,6 @@ public sealed class ExcelSession : IDisposable
         _disposed = true;
 
         RestoreApplicationSettings();
-        OleMessageFilter.Revoke();
 
         if (_startedExcel)
         {
@@ -2409,11 +2484,23 @@ internal sealed class OleMessageFilter : IOleMessageFilter
     private static OleMessageFilter? _registered;
 
     /// <summary>
-    /// Registers the filter for the calling apartment.  Registration is only supported on a single threaded apartment;
-    /// elsewhere it is logged and skipped, leaving rejected calls to surface as exceptions.
+    /// Installs the filter for the calling apartment, if it is not installed already.  Registration is only supported
+    /// on a single threaded apartment; elsewhere it is logged and skipped, leaving rejected calls to surface as
+    /// exceptions.
     /// </summary>
+    /// <remarks>
+    /// The filter belongs to the apartment rather than to any one session, and it is left in place for as long as that
+    /// apartment lasts: it is what protects the calls that close a workbook and quit Excel just as much as the ones
+    /// that opened it, and COM removes it when the thread uninitializes.  Installing it is therefore idempotent, so
+    /// that every path that reaches Excel can ask for it without having to know whether an earlier one already did.
+    /// </remarks>
     public static void Register()
     {
+        if (_registered is not null)
+        {
+            return;
+        }
+
         var filter = new OleMessageFilter();
         int hr = CoRegisterMessageFilter(filter, out _);
 
@@ -2424,25 +2511,6 @@ internal sealed class OleMessageFilter : IOleMessageFilter
         }
 
         _registered = filter;
-    }
-
-    /// <summary>
-    /// Removes the filter previously registered for the calling apartment.
-    /// </summary>
-    public static void Revoke()
-    {
-        if (_registered is null)
-        {
-            return;
-        }
-
-        int hr = CoRegisterMessageFilter(null, out _);
-        if (hr != 0)
-        {
-            Log.Logger.Warning("PFM_EXCEL_MESSAGE_FILTER_NOT_REVOKED: 0x" + Hresult(hr));
-        }
-
-        _registered = null;
     }
 
     /// <summary>

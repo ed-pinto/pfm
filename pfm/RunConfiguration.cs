@@ -124,6 +124,7 @@ public static class RunConfiguration
     [
         new TableSource("Expenditures", "52_Expenditures", "Expenditures"),
         new TableSource("TargetNetIncomeEras", "51_Targets", "TargetNetIncomeEras"),
+        new TableSource("MaxDisposalEras", "51_Targets", "MaxDisposalEras"),
         new TableSource("AllocationTargets", "13_Allocations", "AllocationTargets"),
         new TableSource("AllocationFloors", "13_Allocations", "AllocationFloors"),
         new TableSource("DirectedDraws", "13_Allocations", "DirectedDraws")
@@ -141,7 +142,6 @@ public static class RunConfiguration
     private static readonly string[] ParameterDefinedNames =
     [
         "CdnResidencyYear",
-        "YearlyMaxDisposal",
         "EquityGainsRebalanceThreshold",
         "ConsumptionStressStart",
         "ConsumptionStressFull",
