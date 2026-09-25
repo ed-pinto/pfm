@@ -85,7 +85,9 @@ public sealed class SummaryHarvester : IDisposable
         "RatioEquityConcentrated",
         "RatioEquityCore",
         "RatioEquityInternational",
-        "MinSemesterIncomeThrottle"        
+        "MinSemesterIncomeThrottle",
+        "TargetNetIncomeCurrentDollars",
+        "FloorNetIncomeCurrentDollars"
     ];
 
     private readonly int[] _elementColumns;
